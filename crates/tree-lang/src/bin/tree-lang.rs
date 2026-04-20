@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use regex::Regex;
 use walkdir::WalkDir;
 
-use tree_lang::{find_unified_kinds, Language, LoopKind, UnifiedKind};
+use tree_lang::{find_function_definitions, find_unified_kinds, Language, LoopKind, UnifiedKind};
 
 #[derive(Parser)]
 #[command(name = "tree-lang", version, about = "Unified syntax search over source trees")]
@@ -33,6 +33,9 @@ struct FindArgs {
     /// Unified syntax kind: function_definition, if, loop, or loop:for / loop:while / …
     #[arg(short = 'k', long = "kind", value_name = "KIND")]
     kind: String,
+    /// Match the name of found structures (when the selected kind has names, e.g. functions).
+    #[arg(short = 'n', long = "name", value_name = "REGEX")]
+    name: Option<String>,
 }
 
 fn main() -> std::process::ExitCode {
@@ -71,6 +74,20 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
+    let name_regex = match args.name.as_deref() {
+        Some(p) => match Regex::new(p) {
+            Ok(re) => Some(re),
+            Err(e) => {
+                eprintln!("error: invalid --name regex: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    if name_regex.is_some() && !supports_name_filter(&kinds) {
+        eprintln!("error: --name is currently supported only with --kind function_definition");
+        return std::process::ExitCode::from(2);
+    }
 
     let mut files = Vec::new();
     for root in &args.paths {
@@ -96,26 +113,51 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
                 continue;
             }
         };
-        let matches = match find_unified_kinds(language, &source, &kinds) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("{}: parse error: {e}", path.display());
-                had_error = true;
-                continue;
+        if let Some(name_re) = &name_regex {
+            let functions = match find_function_definitions(language, &source) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{}: parse error: {e}", path.display());
+                    had_error = true;
+                    continue;
+                }
+            };
+            for f in functions.into_iter().filter(|f| name_re.is_match(&f.name)) {
+                let (sl, sc) = byte_to_line_col(&source, f.span.start_byte);
+                let (el, ec) = byte_to_line_col(&source, f.span.end_byte);
+                println!(
+                    "{}\t{}\t{}:{}-{}:{}\t{}",
+                    path.display(),
+                    format_kind(UnifiedKind::FunctionDefinition),
+                    sl,
+                    sc,
+                    el,
+                    ec,
+                    f.name
+                );
             }
-        };
-        for m in matches {
-            let (sl, sc) = byte_to_line_col(&source, m.span.start_byte);
-            let (el, ec) = byte_to_line_col(&source, m.span.end_byte);
-            println!(
-                "{}\t{}\t{}:{}-{}:{}",
-                path.display(),
-                format_kind(m.kind),
-                sl,
-                sc,
-                el,
-                ec
-            );
+        } else {
+            let matches = match find_unified_kinds(language, &source, &kinds) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("{}: parse error: {e}", path.display());
+                    had_error = true;
+                    continue;
+                }
+            };
+            for m in matches {
+                let (sl, sc) = byte_to_line_col(&source, m.span.start_byte);
+                let (el, ec) = byte_to_line_col(&source, m.span.end_byte);
+                println!(
+                    "{}\t{}\t{}:{}-{}:{}",
+                    path.display(),
+                    format_kind(m.kind),
+                    sl,
+                    sc,
+                    el,
+                    ec
+                );
+            }
         }
     }
 
@@ -124,6 +166,10 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
     } else {
         std::process::ExitCode::SUCCESS
     }
+}
+
+fn supports_name_filter(kinds: &[UnifiedKind]) -> bool {
+    kinds.len() == 1 && kinds[0] == UnifiedKind::FunctionDefinition
 }
 
 fn collect_targets(

@@ -52,6 +52,11 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
   - exclude file paths by regular expression (Rust regex syntax)
   - repeatable; if any regex matches the path string, the file is skipped
 
+- `-n, --name <REGEX>`
+  - filter found structure names by regular expression
+  - currently supported when `--kind function_definition`
+  - useful for matching function names (for example `^parse_` or `.*init.*`)
+
 ### Output Format
 
 Each match is printed as one line:
