@@ -7,9 +7,26 @@ COVERAGE_DIR="${ROOT_DIR}/coverage"
 
 cd "${ROOT_DIR}"
 
+run_python_binding_tests() {
+  echo "Running Python binding tests (venv + maturin + unittest)..."
+  local venv="${ROOT_DIR}/.venv-tl-test"
+  if [[ ! -x "${venv}/bin/python" ]]; then
+    python3 -m venv "${venv}"
+  fi
+  # shellcheck disable=SC1090
+  source "${venv}/bin/activate"
+  pip install -q maturin
+  maturin develop --manifest-path "${ROOT_DIR}/crates/tree-lang-py/Cargo.toml" -q
+  (
+    cd "${ROOT_DIR}"
+    python -m unittest discover -s python_tests -p "test_*.py" -v
+  )
+}
+
 if [[ "${1:-}" == "--test-only" ]]; then
   echo "Running tests only..."
   cargo test --workspace
+  run_python_binding_tests
   exit 0
 fi
 
@@ -47,3 +64,5 @@ echo
 echo "Coverage artifacts:"
 echo "  HTML : ${COVERAGE_DIR}/html/index.html"
 echo "  LCOV : ${COVERAGE_DIR}/lcov.info"
+
+run_python_binding_tests

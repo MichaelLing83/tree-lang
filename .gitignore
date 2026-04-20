@@ -1,2 +1,5 @@
 /target
 /coverage
+__pycache__/
+*.egg-info/
+.venv-tl-test/

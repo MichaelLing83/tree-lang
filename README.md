@@ -170,3 +170,55 @@ After that, ensure `~/.cargo/bin` is in your `PATH`, then run:
 ```bash
 tree-lang --help
 ```
+
+## Python Wheel (WHL)
+
+The repository includes a PyO3 binding crate (`crates/tree-lang-py`) so the analyzer can be used directly from Python on major operating systems.
+
+### Build locally
+
+```bash
+python -m pip install maturin
+maturin build --release --manifest-path crates/tree-lang-py/Cargo.toml
+```
+
+Or install into the current virtualenv for development:
+
+```bash
+maturin develop --manifest-path crates/tree-lang-py/Cargo.toml
+```
+
+### Python API (first version)
+
+```python
+import tree_lang
+
+matches = tree_lang.find_in_source(
+    source="fn f(x: i32) { if x > 0 {} }",
+    language="rust",
+    kind="function_definition",
+)
+
+path_matches = tree_lang.find_in_paths(
+    paths=["src"],
+    language="rust",
+    kind="if",
+    exclude=[r"/target/"],
+)
+```
+
+`find_in_source()` and `find_in_paths()` return a list of dictionaries with fields such as:
+
+- `file` (for path mode)
+- `kind`
+- `start_byte`, `end_byte`
+- `start_line`, `start_col`, `end_line`, `end_col`
+- `content`
+
+### CI wheel publishing
+
+A GitHub Actions workflow is provided at `.github/workflows/python-wheels.yml`:
+
+- Builds wheels on Linux/macOS/Windows
+- Builds source distribution (`sdist`)
+- Publishes to PyPI on `v*` tags (recommended with Trusted Publishing)

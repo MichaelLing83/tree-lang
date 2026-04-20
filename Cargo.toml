@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/tree-lang-core", "crates/tree-lang"]
+members = ["crates/tree-lang-core", "crates/tree-lang", "crates/tree-lang-py"]
 resolver = "2"
 
 [workspace.package]
