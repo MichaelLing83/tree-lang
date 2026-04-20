@@ -36,6 +36,18 @@ struct FindArgs {
     /// Match the name of found structures (when the selected kind has names, e.g. functions).
     #[arg(short = 'n', long = "name", value_name = "REGEX")]
     name: Option<String>,
+    /// Match any function parameter name by regular expression (repeatable).
+    #[arg(short = 'p', long = "param-name", value_name = "REGEX")]
+    param_name: Vec<String>,
+    /// Match any function parameter type by regular expression (repeatable).
+    #[arg(short = 't', long = "param-type", value_name = "REGEX")]
+    param_type: Vec<String>,
+    /// Match function parameter name at index: <IDX:REGEX> (repeatable, 0-indexed).
+    #[arg(long = "param-name-at", value_name = "IDX:REGEX")]
+    param_name_at: Vec<String>,
+    /// Match function parameter type at index: <IDX:REGEX> (repeatable, 0-indexed).
+    #[arg(long = "param-type-at", value_name = "IDX:REGEX")]
+    param_type_at: Vec<String>,
 }
 
 fn main() -> std::process::ExitCode {
@@ -84,8 +96,44 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
         },
         None => None,
     };
-    if name_regex.is_some() && !supports_name_filter(&kinds) {
-        eprintln!("error: --name is currently supported only with --kind function_definition");
+    let param_name_regexes: Vec<Regex> = match args.param_name.iter().map(|p| Regex::new(p)).collect() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: invalid --param-name regex: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let param_type_regexes: Vec<Regex> = match args.param_type.iter().map(|p| Regex::new(p)).collect() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: invalid --param-type regex: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let indexed_param_name = match parse_indexed_regexes(&args.param_name_at, "--param-name-at") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let indexed_param_type = match parse_indexed_regexes(&args.param_type_at, "--param-type-at") {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    let uses_function_filters = name_regex.is_some()
+        || !param_name_regexes.is_empty()
+        || !param_type_regexes.is_empty()
+        || !indexed_param_name.is_empty()
+        || !indexed_param_type.is_empty();
+    if uses_function_filters && !supports_name_filter(&kinds) {
+        eprintln!(
+            "error: --name/--param-name/--param-type/--param-name-at/--param-type-at are currently supported only with --kind function_definition"
+        );
         return std::process::ExitCode::from(2);
     }
 
@@ -113,7 +161,7 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
                 continue;
             }
         };
-        if let Some(name_re) = &name_regex {
+        if uses_function_filters {
             let functions = match find_function_definitions(language, &source) {
                 Ok(v) => v,
                 Err(e) => {
@@ -122,7 +170,17 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
                     continue;
                 }
             };
-            for f in functions.into_iter().filter(|f| name_re.is_match(&f.name)) {
+            for f in functions
+                .into_iter()
+                .filter(|f| function_matches(
+                    f,
+                    name_regex.as_ref(),
+                    &param_name_regexes,
+                    &param_type_regexes,
+                    &indexed_param_name,
+                    &indexed_param_type,
+                ))
+            {
                 let (sl, sc) = byte_to_line_col(&source, f.span.start_byte);
                 let (el, ec) = byte_to_line_col(&source, f.span.end_byte);
                 println!(
@@ -170,6 +228,75 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
 
 fn supports_name_filter(kinds: &[UnifiedKind]) -> bool {
     kinds.len() == 1 && kinds[0] == UnifiedKind::FunctionDefinition
+}
+
+#[derive(Debug)]
+struct IndexedRegex {
+    idx: usize,
+    regex: Regex,
+}
+
+fn parse_indexed_regexes(values: &[String], flag: &str) -> Result<Vec<IndexedRegex>, String> {
+    values
+        .iter()
+        .map(|raw| {
+            let (idx_s, regex_s) = raw
+                .split_once(':')
+                .ok_or_else(|| format!("{flag} expects IDX:REGEX, got {raw:?}"))?;
+            let idx = idx_s
+                .parse::<usize>()
+                .map_err(|_| format!("{flag} index must be a non-negative integer, got {idx_s:?}"))?;
+            let regex = Regex::new(regex_s)
+                .map_err(|e| format!("invalid regex in {flag} ({raw:?}): {e}"))?;
+            Ok(IndexedRegex { idx, regex })
+        })
+        .collect()
+}
+
+fn function_matches(
+    f: &tree_lang::FunctionDefinitionNode,
+    name: Option<&Regex>,
+    param_name: &[Regex],
+    param_type: &[Regex],
+    param_name_at: &[IndexedRegex],
+    param_type_at: &[IndexedRegex],
+) -> bool {
+    if let Some(name_re) = name {
+        if !name_re.is_match(&f.name) {
+            return false;
+        }
+    }
+    for re in param_name {
+        if !f.parameters.iter().any(|p| re.is_match(&p.name)) {
+            return false;
+        }
+    }
+    for re in param_type {
+        if !f
+            .parameters
+            .iter()
+            .any(|p| re.is_match(p.ty.as_deref().unwrap_or("")))
+        {
+            return false;
+        }
+    }
+    for rule in param_name_at {
+        let Some(param) = f.parameters.get(rule.idx) else {
+            return false;
+        };
+        if !rule.regex.is_match(&param.name) {
+            return false;
+        }
+    }
+    for rule in param_type_at {
+        let Some(param) = f.parameters.get(rule.idx) else {
+            return false;
+        };
+        if !rule.regex.is_match(param.ty.as_deref().unwrap_or("")) {
+            return false;
+        }
+    }
+    true
 }
 
 fn collect_targets(

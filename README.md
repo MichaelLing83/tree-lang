@@ -57,6 +57,28 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
   - currently supported when `--kind function_definition`
   - useful for matching function names (for example `^parse_` or `.*init.*`)
 
+- `-p, --param-name <REGEX>`
+  - filter by function parameter name (matches any parameter)
+  - repeatable; each provided regex must match at least one parameter name
+  - currently supported when `--kind function_definition`
+
+- `-t, --param-type <REGEX>`
+  - filter by function parameter type (matches any parameter)
+  - repeatable; each provided regex must match at least one parameter type
+  - currently supported when `--kind function_definition`
+
+- `--param-name-at <IDX:REGEX>`
+  - filter by function parameter name at a specific position (0-indexed)
+  - repeatable
+  - example: `--param-name-at 0:^self$`
+  - currently supported when `--kind function_definition`
+
+- `--param-type-at <IDX:REGEX>`
+  - filter by function parameter type at a specific position (0-indexed)
+  - repeatable
+  - example: `--param-type-at 2:^AttrWrapper$`
+  - currently supported when `--kind function_definition`
+
 ### Output Format
 
 Each match is printed as one line:
@@ -69,6 +91,17 @@ Example:
 
 ```text
 crates/tree-lang/tests/mvp.rs	FunctionDefinition	12:0-34:1
+
+With function name + parameter filters:
+
+```bash
+tree-lang find crates/tree-lang/tests/data/rust \
+  -l rust \
+  -k function_definition \
+  -n '^parse_' \
+  -p '^attrs$' \
+  --param-type-at '1:^Bound$'
+```
 ```
 
 ## Build / Release CLI Binary
