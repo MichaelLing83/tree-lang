@@ -1,0 +1,24 @@
+[function_definition.c]
+fixture = "c/libgit2_repository.c"
+count = 140
+names = ["set_odb", "git_repository_free"]
+
+[function_definition.cpp]
+fixture = "cpp/llvm_Instructions.cpp"
+count = 325
+names = ["PHINode::PHINode", "AllocaInst::getAllocationSize"]
+
+[function_definition.rust]
+fixture = "rust/rustc_parse_expr.rs"
+count = 144
+names = ["parse_expr", "parse_expr_assoc_with"]
+
+[function_definition.python]
+fixture = "python/django_query.py"
+count = 172
+names = ["__init__", "__iter__"]
+
+[function_definition.java]
+fixture = "java/spring_AnnotationUtils.java"
+count = 52
+names = ["getAnnotation", "isCandidateClass"]

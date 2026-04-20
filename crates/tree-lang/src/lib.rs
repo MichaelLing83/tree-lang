@@ -40,6 +40,13 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// A function definition node with its normalized name (when available).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FunctionDefinitionNode {
+    pub span: Span,
+    pub name: String,
+}
+
 /// Depth-first walk of `tree`, returning every node that maps to a [`UnifiedKind`].
 pub fn extract_unified(language: Language, tree: &Tree) -> Vec<MappedNode> {
     let mut out = Vec::new();
@@ -74,6 +81,17 @@ pub fn find_unified_kinds(
     Ok(extract_unified_kinds(language, &tree, kinds))
 }
 
+/// Parse source and return function-definition nodes with extracted names.
+pub fn find_function_definitions(
+    language: Language,
+    source: &str,
+) -> Result<Vec<FunctionDefinitionNode>, ParseError> {
+    let tree = parse(language, source)?;
+    let mut out = Vec::new();
+    walk_function_definitions(language, source.as_bytes(), tree.root_node(), &mut out);
+    Ok(out)
+}
+
 fn walk(language: Language, node: Node<'_>, out: &mut Vec<MappedNode>, kinds: Option<&[UnifiedKind]>) {
     let span = Span::new(node.range().start_byte, node.range().end_byte);
     if let Some(m) = classify(language, node.kind(), span) {
@@ -88,5 +106,70 @@ fn walk(language: Language, node: Node<'_>, out: &mut Vec<MappedNode>, kinds: Op
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk(language, child, out, kinds);
+    }
+}
+
+fn walk_function_definitions(
+    language: Language,
+    source: &[u8],
+    node: Node<'_>,
+    out: &mut Vec<FunctionDefinitionNode>,
+) {
+    let span = Span::new(node.range().start_byte, node.range().end_byte);
+    if let Some(m) = classify(language, node.kind(), span) {
+        if m.kind == UnifiedKind::FunctionDefinition {
+            if let Some(name) = extract_function_name(language, node, source) {
+                out.push(FunctionDefinitionNode { span, name });
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_function_definitions(language, source, child, out);
+    }
+}
+
+fn extract_function_name(language: Language, node: Node<'_>, source: &[u8]) -> Option<String> {
+    match language {
+        Language::Python | Language::Java | Language::Rust => {
+            let name_node = node.child_by_field_name("name")?;
+            node_text(name_node, source)
+        }
+        Language::C | Language::Cpp => {
+            let declarator = node.child_by_field_name("declarator")?;
+            extract_c_like_declarator_name(declarator, source)
+        }
+    }
+}
+
+fn extract_c_like_declarator_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" | "field_identifier" | "qualified_identifier" | "operator_name"
+        | "destructor_name" => return node_text(node, source),
+        _ => {}
+    }
+
+    if let Some(inner) = node.child_by_field_name("declarator") {
+        if let Some(name) = extract_c_like_declarator_name(inner, source) {
+            return Some(name);
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(name) = extract_c_like_declarator_name(child, source) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn node_text(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let text = node.utf8_text(source).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
