@@ -1,0 +1,13 @@
+[package]
+name = "tree-lang"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+tree-lang-core = { path = "../tree-lang-core" }
+tree-sitter = "0.25"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
