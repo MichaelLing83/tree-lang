@@ -20,4 +20,40 @@ impl Language {
             Rust => tree_sitter_rust::LANGUAGE.into(),
         }
     }
+
+    /// CLI / config spellings (case-insensitive).
+    pub fn parse_cli_name(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "c" => Some(Self::C),
+            "cpp" | "c++" | "cxx" => Some(Self::Cpp),
+            "java" => Some(Self::Java),
+            "python" | "py" => Some(Self::Python),
+            "rust" | "rs" => Some(Self::Rust),
+            _ => None,
+        }
+    }
+
+    /// File extensions used when recursively collecting sources under a directory.
+    pub fn source_extensions(self) -> &'static [&'static str] {
+        use Language::*;
+        match self {
+            C => &[".c", ".h"],
+            Cpp => &[".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".h++", ".h"],
+            Java => &[".java"],
+            Python => &[".py"],
+            Rust => &[".rs"],
+        }
+    }
+}
+
+impl std::str::FromStr for Language {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_cli_name(s).ok_or_else(|| {
+            format!(
+                "unknown language {s:?}: expected one of c, cpp, java, python, rust"
+            )
+        })
+    }
 }
