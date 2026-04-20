@@ -29,6 +29,7 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
   - one or more file or directory paths
   - if a file is given, it is analyzed directly
   - if a directory is given, `tree-lang` recursively scans files matching the selected language extensions
+  - use `-` to read source from stdin
 
 #### Options
 
@@ -146,6 +147,9 @@ tree-lang find crates/tree-lang/tests/data/rust \
   -n '^parse_' \
   -p '^attrs$' \
   --param-type-at '1:^Bound$'
+
+# Read source from stdin
+cat file.rs | tree-lang find - -l rust -k function_definition
 ```
 
 ## Build / Release CLI Binary

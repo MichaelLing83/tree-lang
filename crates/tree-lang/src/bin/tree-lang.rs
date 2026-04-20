@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
@@ -73,7 +74,7 @@ fn main() -> std::process::ExitCode {
 
 fn run_find(args: FindArgs) -> std::process::ExitCode {
     if args.paths.is_empty() {
-        eprintln!("error: at least one path is required");
+        eprintln!("error: at least one path is required (or use '-' for stdin)");
         return std::process::ExitCode::from(2);
     }
 
@@ -167,7 +168,12 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
     }
 
     let mut files = Vec::new();
+    let mut use_stdin = false;
     for root in &args.paths {
+        if root.as_os_str() == "-" {
+            use_stdin = true;
+            continue;
+        }
         match collect_targets(root, language, &exclude) {
             Ok(mut v) => files.append(&mut v),
             Err(e) => {
@@ -181,6 +187,29 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
     files.dedup();
 
     let mut had_error = false;
+    if use_stdin {
+        let mut source = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut source) {
+            eprintln!("<stdin>: read error: {e}");
+            return std::process::ExitCode::from(1);
+        }
+        process_source(
+            Path::new("<stdin>"),
+            &source,
+            language,
+            &kinds,
+            uses_function_filters,
+            name_regex.as_ref(),
+            &param_name_regexes,
+            &param_type_regexes,
+            &indexed_param_name,
+            &indexed_param_type,
+            print_fields.as_deref(),
+            args.print_format.as_deref(),
+            &mut had_error,
+        );
+    }
+
     for path in files {
         let source = match fs::read_to_string(&path) {
             Ok(s) => s,
@@ -190,73 +219,105 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
                 continue;
             }
         };
-        if uses_function_filters {
-            let functions = match find_function_definitions(language, &source) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("{}: parse error: {e}", path.display());
-                    had_error = true;
-                    continue;
-                }
-            };
-            for f in functions
-                .into_iter()
-                .filter(|f| function_matches(
-                    f,
-                    name_regex.as_ref(),
-                    &param_name_regexes,
-                    &param_type_regexes,
-                    &indexed_param_name,
-                    &indexed_param_type,
-                ))
-            {
-                let (sl, sc) = byte_to_line_col(&source, f.span.start_byte);
-                let (el, ec) = byte_to_line_col(&source, f.span.end_byte);
-                print_match_line(
-                    &path,
-                    &format_kind(UnifiedKind::FunctionDefinition),
-                    sl,
-                    sc,
-                    el,
-                    ec,
-                    Some(&f.name),
-                    span_text(&source, f.span.start_byte, f.span.end_byte),
-                    print_fields.as_deref(),
-                    args.print_format.as_deref(),
-                );
-            }
-        } else {
-            let matches = match find_unified_kinds(language, &source, &kinds) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("{}: parse error: {e}", path.display());
-                    had_error = true;
-                    continue;
-                }
-            };
-            for m in matches {
-                let (sl, sc) = byte_to_line_col(&source, m.span.start_byte);
-                let (el, ec) = byte_to_line_col(&source, m.span.end_byte);
-                print_match_line(
-                    &path,
-                    &format_kind(m.kind),
-                    sl,
-                    sc,
-                    el,
-                    ec,
-                    None,
-                    span_text(&source, m.span.start_byte, m.span.end_byte),
-                    print_fields.as_deref(),
-                    args.print_format.as_deref(),
-                );
-            }
-        }
+        process_source(
+            &path,
+            &source,
+            language,
+            &kinds,
+            uses_function_filters,
+            name_regex.as_ref(),
+            &param_name_regexes,
+            &param_type_regexes,
+            &indexed_param_name,
+            &indexed_param_type,
+            print_fields.as_deref(),
+            args.print_format.as_deref(),
+            &mut had_error,
+        );
     }
 
     if had_error {
         std::process::ExitCode::from(1)
     } else {
         std::process::ExitCode::SUCCESS
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_source(
+    path: &Path,
+    source: &str,
+    language: Language,
+    kinds: &[UnifiedKind],
+    uses_function_filters: bool,
+    name_regex: Option<&Regex>,
+    param_name_regexes: &[Regex],
+    param_type_regexes: &[Regex],
+    indexed_param_name: &[IndexedRegex],
+    indexed_param_type: &[IndexedRegex],
+    print_fields: Option<&[PrintField]>,
+    print_format: Option<&str>,
+    had_error: &mut bool,
+) {
+    if uses_function_filters {
+        let functions = match find_function_definitions(language, source) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{}: parse error: {e}", path.display());
+                *had_error = true;
+                return;
+            }
+        };
+        for f in functions.into_iter().filter(|f| {
+            function_matches(
+                f,
+                name_regex,
+                param_name_regexes,
+                param_type_regexes,
+                indexed_param_name,
+                indexed_param_type,
+            )
+        }) {
+            let (sl, sc) = byte_to_line_col(source, f.span.start_byte);
+            let (el, ec) = byte_to_line_col(source, f.span.end_byte);
+            print_match_line(
+                path,
+                &format_kind(UnifiedKind::FunctionDefinition),
+                sl,
+                sc,
+                el,
+                ec,
+                Some(&f.name),
+                span_text(source, f.span.start_byte, f.span.end_byte),
+                print_fields,
+                print_format,
+            );
+        }
+    } else {
+        let matches = match find_unified_kinds(language, source, kinds) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("{}: parse error: {e}", path.display());
+                *had_error = true;
+                return;
+            }
+        };
+        for m in matches {
+            let (sl, sc) = byte_to_line_col(source, m.span.start_byte);
+            let (el, ec) = byte_to_line_col(source, m.span.end_byte);
+            print_match_line(
+                path,
+                &format_kind(m.kind),
+                sl,
+                sc,
+                el,
+                ec,
+                None,
+                span_text(source, m.span.start_byte, m.span.end_byte),
+                print_fields,
+                print_format,
+            );
+        }
     }
 }
 
