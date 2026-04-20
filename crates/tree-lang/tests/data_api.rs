@@ -40,6 +40,29 @@ struct ExpectedFunctionDefinition {
 #[derive(Debug, Deserialize)]
 struct Expectations {
     function_definition: ExpectedFunctionDefinition,
+    function_parameters: ExpectedFunctionParameters,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedParameter {
+    name: String,
+    type_equals: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedFunctionSignature {
+    fixture: String,
+    function: String,
+    params: Vec<ExpectedParameter>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpectedFunctionParameters {
+    c: ExpectedFunctionSignature,
+    cpp: ExpectedFunctionSignature,
+    rust: ExpectedFunctionSignature,
+    python: ExpectedFunctionSignature,
+    java: ExpectedFunctionSignature,
 }
 
 fn read_expectations() -> Expectations {
@@ -111,4 +134,78 @@ fn multi_kind_search_returns_requested_kinds_only() {
     assert!(nodes.iter().all(|n| {
         n.kind == UnifiedKind::FunctionDefinition || n.kind == UnifiedKind::If
     }));
+}
+
+#[test]
+fn function_parameter_name_and_type_checks_work_on_real_projects() {
+    let expected = read_expectations().function_parameters;
+    let fixtures = [
+        (Language::C, expected.c),
+        (Language::Cpp, expected.cpp),
+        (Language::Rust, expected.rust),
+        (Language::Python, expected.python),
+        (Language::Java, expected.java),
+    ];
+
+    for (language, expected_signature) in fixtures {
+        let source = read_data(&expected_signature.fixture);
+        let functions = find_function_definitions(language, &source).expect("parse");
+
+        let matches: Vec<_> = functions
+            .iter()
+            .filter(|f| f.name == expected_signature.function)
+            .collect();
+        assert!(
+            !matches.is_empty(),
+            "expected function '{}' in {:?} fixture {}",
+            expected_signature.function,
+            language,
+            expected_signature.fixture
+        );
+
+        let best_match = matches
+            .iter()
+            .find(|f| f.parameters.len() == expected_signature.params.len())
+            .copied()
+            .unwrap_or(matches[0]);
+
+        assert_eq!(
+            best_match.parameters.len(),
+            expected_signature.params.len(),
+            "unexpected parameter count for function '{}' in {:?} fixture {}",
+            expected_signature.function,
+            language,
+            expected_signature.fixture
+        );
+
+        for (idx, expected_param) in expected_signature.params.iter().enumerate() {
+            let actual = &best_match.parameters[idx];
+            assert_eq!(
+                actual.name, expected_param.name,
+                "parameter name mismatch at index {} for function '{}' in {:?} fixture {}",
+                idx, expected_signature.function, language, expected_signature.fixture
+            );
+            if let Some(type_equals) = &expected_param.type_equals {
+                let actual_ty = actual.ty.as_deref().unwrap_or("");
+                let normalized_actual = normalize_type(actual_ty);
+                let normalized_expected = normalize_type(type_equals);
+                assert!(
+                    normalized_actual == normalized_expected,
+                    "parameter type mismatch at index {} for function '{}' in {:?} fixture {}; expected '{}' (normalized '{}'), got '{}' (normalized '{}')",
+                    idx,
+                    expected_signature.function,
+                    language,
+                    expected_signature.fixture,
+                    type_equals,
+                    normalized_expected,
+                    actual_ty,
+                    normalized_actual
+                );
+            }
+        }
+    }
+}
+
+fn normalize_type(s: &str) -> String {
+    s.split_whitespace().collect::<String>()
 }

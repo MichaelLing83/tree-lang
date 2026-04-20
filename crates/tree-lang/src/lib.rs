@@ -45,6 +45,14 @@ impl std::error::Error for ParseError {}
 pub struct FunctionDefinitionNode {
     pub span: Span,
     pub name: String,
+    pub parameters: Vec<FunctionParameter>,
+}
+
+/// One function parameter with normalized name and optional type text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FunctionParameter {
+    pub name: String,
+    pub ty: Option<String>,
 }
 
 /// Depth-first walk of `tree`, returning every node that maps to a [`UnifiedKind`].
@@ -119,7 +127,12 @@ fn walk_function_definitions(
     if let Some(m) = classify(language, node.kind(), span) {
         if m.kind == UnifiedKind::FunctionDefinition {
             if let Some(name) = extract_function_name(language, node, source) {
-                out.push(FunctionDefinitionNode { span, name });
+                let parameters = extract_function_parameters(language, node, source);
+                out.push(FunctionDefinitionNode {
+                    span,
+                    name,
+                    parameters,
+                });
             }
         }
     }
@@ -142,6 +155,157 @@ fn extract_function_name(language: Language, node: Node<'_>, source: &[u8]) -> O
     }
 }
 
+fn extract_function_parameters(
+    language: Language,
+    node: Node<'_>,
+    source: &[u8],
+) -> Vec<FunctionParameter> {
+    let Some(parameters_node) = node.child_by_field_name("parameters") else {
+        return match language {
+            Language::C | Language::Cpp => node
+                .child_by_field_name("declarator")
+                .and_then(find_c_like_parameters_node)
+                .map(|p| extract_c_like_parameters(p, source))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+    };
+    match language {
+        Language::C | Language::Cpp => extract_c_like_parameters(parameters_node, source),
+        Language::Rust => extract_rust_parameters(parameters_node, source),
+        Language::Python => extract_python_parameters(parameters_node, source),
+        Language::Java => extract_java_parameters(parameters_node, source),
+    }
+}
+
+fn find_c_like_parameters_node(node: Node<'_>) -> Option<Node<'_>> {
+    if let Some(parameters) = node.child_by_field_name("parameters") {
+        return Some(parameters);
+    }
+    if let Some(inner) = node.child_by_field_name("declarator") {
+        if let Some(parameters) = find_c_like_parameters_node(inner) {
+            return Some(parameters);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(parameters) = find_c_like_parameters_node(child) {
+            return Some(parameters);
+        }
+    }
+    None
+}
+
+fn extract_c_like_parameters(parameters_node: Node<'_>, source: &[u8]) -> Vec<FunctionParameter> {
+    let mut out = Vec::new();
+    let mut cursor = parameters_node.walk();
+    for child in parameters_node.children(&mut cursor) {
+        if !child.is_named() {
+            continue;
+        }
+        let declarator = child.child_by_field_name("declarator");
+        let declarator_name_node =
+            declarator.and_then(c_like_declarator_name_node).or_else(|| child.child_by_field_name("name"));
+        let name = declarator_name_node
+            .and_then(|n| node_text(n, source))
+            .or_else(|| declarator.and_then(|d| extract_c_like_declarator_name(d, source)));
+        let mut ty = child.child_by_field_name("type").and_then(|t| node_text(t, source));
+        if let Some(name_node) = declarator_name_node {
+            ty = c_like_parameter_type_from_full(child, source, name_node).or_else(|| {
+                let name_ref = name.as_deref().unwrap_or_default();
+                if let (Some(base_type), Some(decl)) = (&ty, declarator) {
+                    let suffix = c_like_declarator_suffix(decl, source, name_ref);
+                    if suffix.is_empty() {
+                        Some(base_type.clone())
+                    } else {
+                        Some(format!("{} {}", base_type, suffix))
+                    }
+                } else {
+                    ty.clone()
+                }
+            });
+        } else if let Some(base_type) = &ty {
+            if base_type.is_empty() {
+                ty = None;
+            }
+        }
+        if let Some(name) = name {
+            out.push(FunctionParameter { name, ty });
+        }
+    }
+    out
+}
+
+fn extract_rust_parameters(parameters_node: Node<'_>, source: &[u8]) -> Vec<FunctionParameter> {
+    let mut out = Vec::new();
+    let mut cursor = parameters_node.walk();
+    for child in parameters_node.children(&mut cursor) {
+        if !child.is_named() {
+            continue;
+        }
+        if child.kind() == "self_parameter" {
+            let ty = child.child_by_field_name("type").and_then(|t| node_text(t, source));
+            out.push(FunctionParameter {
+                name: "self".to_string(),
+                ty,
+            });
+            continue;
+        }
+        let name = child
+            .child_by_field_name("pattern")
+            .and_then(|p| first_identifier_descendant(p, source))
+            .or_else(|| child.child_by_field_name("name").and_then(|n| node_text(n, source)));
+        let ty = child.child_by_field_name("type").and_then(|t| node_text(t, source));
+        if let Some(name) = name {
+            out.push(FunctionParameter { name, ty });
+        }
+    }
+    out
+}
+
+fn extract_python_parameters(parameters_node: Node<'_>, source: &[u8]) -> Vec<FunctionParameter> {
+    let mut out = Vec::new();
+    let mut cursor = parameters_node.walk();
+    for child in parameters_node.children(&mut cursor) {
+        if !child.is_named() {
+            continue;
+        }
+        let name = child
+            .child_by_field_name("name")
+            .and_then(|n| node_text(n, source))
+            .or_else(|| first_identifier_descendant(child, source));
+        let ty = child.child_by_field_name("type").and_then(|t| node_text(t, source));
+        if let Some(name) = name {
+            out.push(FunctionParameter { name, ty });
+        }
+    }
+    out
+}
+
+fn extract_java_parameters(parameters_node: Node<'_>, source: &[u8]) -> Vec<FunctionParameter> {
+    let mut out = Vec::new();
+    let mut cursor = parameters_node.walk();
+    for child in parameters_node.children(&mut cursor) {
+        if !child.is_named() {
+            continue;
+        }
+        let name_node = child.child_by_field_name("name");
+        let name = name_node
+            .and_then(|n| node_text(n, source))
+            .or_else(|| first_identifier_descendant(child, source));
+        let mut ty = child.child_by_field_name("type").and_then(|t| node_text(t, source));
+        if let Some(name_node) = name_node {
+            if let Some(full_ty) = java_parameter_type_from_full(child, source, name_node) {
+                ty = Some(full_ty);
+            }
+        }
+        if let Some(name) = name {
+            out.push(FunctionParameter { name, ty });
+        }
+    }
+    out
+}
+
 fn extract_c_like_declarator_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
         "identifier" | "field_identifier" | "qualified_identifier" | "operator_name"
@@ -159,6 +323,97 @@ fn extract_c_like_declarator_name(node: Node<'_>, source: &[u8]) -> Option<Strin
     for child in node.children(&mut cursor) {
         if let Some(name) = extract_c_like_declarator_name(child, source) {
             return Some(name);
+        }
+    }
+    None
+}
+
+fn first_identifier_descendant(node: Node<'_>, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" | "field_identifier" => return node_text(node, source),
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(name) = first_identifier_descendant(child, source) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn c_like_declarator_suffix(declarator: Node<'_>, source: &[u8], name: &str) -> String {
+    let raw = declarator.utf8_text(source).ok().unwrap_or_default();
+    raw.replacen(name, "", 1).trim().to_string()
+}
+
+fn c_like_parameter_type_from_full(
+    param_node: Node<'_>,
+    source: &[u8],
+    name_node: Node<'_>,
+) -> Option<String> {
+    let p_start = param_node.start_byte();
+    let p_end = param_node.end_byte();
+    let n_start = name_node.start_byte();
+    let n_end = name_node.end_byte();
+    if n_start < p_start || n_end > p_end || n_start >= n_end {
+        return None;
+    }
+    let param_bytes = &source[p_start..p_end];
+    let rel_start = n_start - p_start;
+    let rel_end = n_end - p_start;
+    let mut bytes = Vec::with_capacity(param_bytes.len().saturating_sub(rel_end - rel_start));
+    bytes.extend_from_slice(&param_bytes[..rel_start]);
+    bytes.extend_from_slice(&param_bytes[rel_end..]);
+    let ty = std::str::from_utf8(&bytes).ok()?.trim().to_string();
+    if ty.is_empty() {
+        None
+    } else {
+        Some(ty)
+    }
+}
+
+fn java_parameter_type_from_full(
+    param_node: Node<'_>,
+    source: &[u8],
+    name_node: Node<'_>,
+) -> Option<String> {
+    let p_start = param_node.start_byte();
+    let p_end = param_node.end_byte();
+    let n_start = name_node.start_byte();
+    let n_end = name_node.end_byte();
+    if n_start < p_start || n_end > p_end || n_start >= n_end {
+        return None;
+    }
+    let param_bytes = &source[p_start..p_end];
+    let rel_start = n_start - p_start;
+    let rel_end = n_end - p_start;
+    let mut bytes = Vec::with_capacity(param_bytes.len().saturating_sub(rel_end - rel_start));
+    bytes.extend_from_slice(&param_bytes[..rel_start]);
+    bytes.extend_from_slice(&param_bytes[rel_end..]);
+    let ty = std::str::from_utf8(&bytes).ok()?.trim().to_string();
+    if ty.is_empty() {
+        None
+    } else {
+        Some(ty)
+    }
+}
+
+fn c_like_declarator_name_node(node: Node<'_>) -> Option<Node<'_>> {
+    match node.kind() {
+        "identifier" | "field_identifier" | "qualified_identifier" | "operator_name"
+        | "destructor_name" => return Some(node),
+        _ => {}
+    }
+    if let Some(inner) = node.child_by_field_name("declarator") {
+        if let Some(name_node) = c_like_declarator_name_node(inner) {
+            return Some(name_node);
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(name_node) = c_like_declarator_name_node(child) {
+            return Some(name_node);
         }
     }
     None

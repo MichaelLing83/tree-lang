@@ -22,3 +22,45 @@ names = ["__init__", "__iter__"]
 fixture = "java/spring_AnnotationUtils.java"
 count = 52
 names = ["getAnnotation", "isCandidateClass"]
+
+[function_parameters.c]
+fixture = "c/libgit2_repository.c"
+function = "set_odb"
+[[function_parameters.c.params]]
+name = "repo"
+type_equals = "git_repository *"
+[[function_parameters.c.params]]
+name = "odb"
+type_equals = "git_odb *"
+
+[function_parameters.cpp]
+fixture = "cpp/llvm_Instructions.cpp"
+function = "AllocaInst::getAllocationSize"
+[[function_parameters.cpp.params]]
+name = "DL"
+type_equals = "const DataLayout &"
+
+[function_parameters.rust]
+fixture = "rust/rustc_parse_expr.rs"
+function = "parse_expr_assoc_with"
+[[function_parameters.rust.params]]
+name = "self"
+[[function_parameters.rust.params]]
+name = "min_prec"
+type_equals = "Bound"
+[[function_parameters.rust.params]]
+name = "attrs"
+type_equals = "AttrWrapper"
+
+[function_parameters.python]
+fixture = "python/django_query.py"
+function = "_async_generator"
+[[function_parameters.python.params]]
+name = "self"
+
+[function_parameters.java]
+fixture = "java/spring_AnnotationUtils.java"
+function = "isSingleLevelPresent"
+[[function_parameters.java.params]]
+name = "mergedAnnotation"
+type_equals = "MergedAnnotation"
