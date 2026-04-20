@@ -79,6 +79,25 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
   - example: `--param-type-at 2:^AttrWrapper$`
   - currently supported when `--kind function_definition`
 
+- `--print [FIELDS]`
+  - customize output fields for each match
+  - `--print` without value is equivalent to `--print all`
+  - supported fields: `file`, `type`, `start`, `end`, `content`
+  - `all` expands to `file,type,start,end,content`
+  - content is escaped (`\n`, `\t`, etc.) to keep one match per output line
+
+- `--print-format <TEMPLATE>`
+  - custom output template for each match
+  - cannot be used together with `--print`
+  - supported placeholders:
+    - `{file}`
+    - `{type}`
+    - `{start}` (like `12:0`)
+    - `{end}` (like `34:1`)
+    - `{range}` (like `12:0-34:1`)
+    - `{name}` (empty if not available)
+    - `{content}` (escaped node text)
+
 ### Output Format
 
 Each match is printed as one line:
@@ -87,10 +106,36 @@ Each match is printed as one line:
 <file_path>\t<UnifiedKind>\t<start_line>:<start_col>-<end_line>:<end_col>
 ```
 
+When function filters are used (`-n`, `-p`, `-t`, `--param-name-at`, `--param-type-at`), an additional function name column is included.
+
+When `--print` is not set, output keeps the default format:
+
+```text
+<file_path>\t<UnifiedKind>\t<start_line>:<start_col>-<end_line>:<end_col>
+```
+
+When `--print` is set, output columns are exactly controlled by `FIELDS`.
+
+Examples:
+
+```bash
+# Equivalent to --print all
+tree-lang find src -l rust -k function_definition --print
+
+# Custom field order / subset
+tree-lang find src -l rust -k function_definition --print file,type,start,end
+tree-lang find src -l rust -k function_definition --print type,content
+
+# Custom format template
+tree-lang find src -l rust -k function_definition \
+  --print-format '{file}\t{type}\t{name}\t{range}\t{content}'
+```
+
 Example:
 
 ```text
 crates/tree-lang/tests/mvp.rs	FunctionDefinition	12:0-34:1
+```
 
 With function name + parameter filters:
 
@@ -101,7 +146,6 @@ tree-lang find crates/tree-lang/tests/data/rust \
   -n '^parse_' \
   -p '^attrs$' \
   --param-type-at '1:^Bound$'
-```
 ```
 
 ## Build / Release CLI Binary

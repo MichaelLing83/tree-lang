@@ -48,6 +48,20 @@ struct FindArgs {
     /// Match function parameter type at index: <IDX:REGEX> (repeatable, 0-indexed).
     #[arg(long = "param-type-at", value_name = "IDX:REGEX")]
     param_type_at: Vec<String>,
+    /// Print selected output fields: all or comma-separated fields.
+    /// Fields: file,type,start,end,content
+    /// `--print` (without value) is equivalent to `--print all`.
+    #[arg(
+        long = "print",
+        value_name = "FIELDS",
+        num_args = 0..=1,
+        default_missing_value = "all"
+    )]
+    print: Option<String>,
+    /// Print using a format template.
+    /// Supported placeholders: {file},{type},{start},{end},{range},{name},{content}
+    #[arg(long = "print-format", value_name = "TEMPLATE")]
+    print_format: Option<String>,
 }
 
 fn main() -> std::process::ExitCode {
@@ -60,6 +74,21 @@ fn main() -> std::process::ExitCode {
 fn run_find(args: FindArgs) -> std::process::ExitCode {
     if args.paths.is_empty() {
         eprintln!("error: at least one path is required");
+        return std::process::ExitCode::from(2);
+    }
+
+    let print_fields = match args.print.as_deref() {
+        Some(raw) => match parse_print_fields(raw) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("error: invalid --print value: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    if print_fields.is_some() && args.print_format.is_some() {
+        eprintln!("error: --print and --print-format cannot be used together");
         return std::process::ExitCode::from(2);
     }
 
@@ -183,15 +212,17 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
             {
                 let (sl, sc) = byte_to_line_col(&source, f.span.start_byte);
                 let (el, ec) = byte_to_line_col(&source, f.span.end_byte);
-                println!(
-                    "{}\t{}\t{}:{}-{}:{}\t{}",
-                    path.display(),
-                    format_kind(UnifiedKind::FunctionDefinition),
+                print_match_line(
+                    &path,
+                    &format_kind(UnifiedKind::FunctionDefinition),
                     sl,
                     sc,
                     el,
                     ec,
-                    f.name
+                    Some(&f.name),
+                    span_text(&source, f.span.start_byte, f.span.end_byte),
+                    print_fields.as_deref(),
+                    args.print_format.as_deref(),
                 );
             }
         } else {
@@ -206,14 +237,17 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
             for m in matches {
                 let (sl, sc) = byte_to_line_col(&source, m.span.start_byte);
                 let (el, ec) = byte_to_line_col(&source, m.span.end_byte);
-                println!(
-                    "{}\t{}\t{}:{}-{}:{}",
-                    path.display(),
-                    format_kind(m.kind),
+                print_match_line(
+                    &path,
+                    &format_kind(m.kind),
                     sl,
                     sc,
                     el,
-                    ec
+                    ec,
+                    None,
+                    span_text(&source, m.span.start_byte, m.span.end_byte),
+                    print_fields.as_deref(),
+                    args.print_format.as_deref(),
                 );
             }
         }
@@ -402,4 +436,140 @@ fn byte_to_line_col(source: &str, byte: usize) -> (usize, usize) {
         .map(|(_, line_prefix)| line_prefix.len())
         .unwrap_or(prefix.len());
     (line, col)
+}
+
+fn span_text(source: &str, start: usize, end: usize) -> String {
+    let s = start.min(source.len());
+    let e = end.min(source.len());
+    if s >= e {
+        String::new()
+    } else {
+        source[s..e].to_string()
+    }
+}
+
+fn print_match_line(
+    path: &Path,
+    kind: &str,
+    sl: usize,
+    sc: usize,
+    el: usize,
+    ec: usize,
+    name: Option<&str>,
+    node_text: String,
+    print_fields: Option<&[PrintField]>,
+    print_format: Option<&str>,
+) {
+    let range = format!("{sl}:{sc}-{el}:{ec}");
+    let start = format!("{sl}:{sc}");
+    let end = format!("{el}:{ec}");
+    let escaped_content = node_text.escape_default().to_string();
+    let file = path.display().to_string();
+
+    if let Some(template) = print_format {
+        let rendered = render_template(
+            template,
+            &file,
+            kind,
+            &start,
+            &end,
+            &range,
+            name.unwrap_or(""),
+            &escaped_content,
+        );
+        println!("{rendered}");
+        return;
+    }
+
+    if let Some(fields) = print_fields {
+        let mut cols = Vec::new();
+        for field in fields {
+            match field {
+                PrintField::File => cols.push(path.display().to_string()),
+                PrintField::Type => cols.push(kind.to_string()),
+                PrintField::Start => cols.push(start.clone()),
+                PrintField::End => cols.push(end.clone()),
+                PrintField::Content => cols.push(escaped_content.clone()),
+            }
+        }
+        println!("{}", cols.join("\t"));
+        return;
+    }
+
+    // Default output keeps the earlier shape for backward compatibility.
+    if let Some(name) = name {
+        println!(
+            "{}\t{}\t{}\t{}",
+            path.display(),
+            kind,
+            range,
+            name
+        );
+    } else {
+        println!("{}\t{}\t{}", path.display(), kind, range);
+    }
+}
+
+fn render_template(
+    template: &str,
+    file: &str,
+    kind: &str,
+    start: &str,
+    end: &str,
+    range: &str,
+    name: &str,
+    content: &str,
+) -> String {
+    template
+        .replace("{file}", file)
+        .replace("{type}", kind)
+        .replace("{start}", start)
+        .replace("{end}", end)
+        .replace("{range}", range)
+        .replace("{name}", name)
+        .replace("{content}", content)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrintField {
+    File,
+    Type,
+    Start,
+    End,
+    Content,
+}
+
+fn parse_print_fields(raw: &str) -> Result<Vec<PrintField>, String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized == "all" {
+        return Ok(vec![
+            PrintField::File,
+            PrintField::Type,
+            PrintField::Start,
+            PrintField::End,
+            PrintField::Content,
+        ]);
+    }
+    if normalized.is_empty() {
+        return Err("empty value".to_string());
+    }
+
+    let mut fields = Vec::new();
+    for part in normalized.split(',') {
+        let token = part.trim();
+        let field = match token {
+            "file" => PrintField::File,
+            "type" => PrintField::Type,
+            "start" => PrintField::Start,
+            "end" => PrintField::End,
+            "content" => PrintField::Content,
+            _ => {
+                return Err(format!(
+                    "unknown field {token:?}; expected one of file,type,start,end,content or all"
+                ));
+            }
+        };
+        fields.push(field);
+    }
+    Ok(fields)
 }
