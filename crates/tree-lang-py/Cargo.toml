@@ -7,8 +7,16 @@ edition.workspace = true
 name = "tree_lang"
 crate-type = ["cdylib"]
 
+[features]
+# Wheels / maturin builds pass `--features extension-module` (see pyproject + metadata).
+# `cargo test` / llvm-cov omit this so the test harness can link libpython.
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+pyo3 = { version = "0.22", features = ["abi3-py38"] }
 regex = "1"
 tree-lang = { path = "../tree-lang" }
 walkdir = "2"
+
+[package.metadata.maturin]
+features = ["extension-module"]

@@ -248,3 +248,141 @@ fn span_text(source: &str, start: usize, end: usize) -> String {
         source[s..e].to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn parse_language_accepts_and_rejects() {
+        assert!(parse_language("rust").is_ok());
+        assert!(parse_language("RUST").is_ok());
+        assert!(parse_language("nope").is_err());
+    }
+
+    #[test]
+    fn parse_kind_covers_main_branches() {
+        assert!(matches!(
+            parse_kind("function_definition").unwrap().as_slice(),
+            [UnifiedKind::FunctionDefinition]
+        ));
+        assert!(matches!(
+            parse_kind("loop:for").unwrap().as_slice(),
+            [UnifiedKind::Loop(LoopKind::For)]
+        ));
+        assert_eq!(parse_kind("loop").unwrap().len(), 5);
+        assert!(parse_kind("loop:typo").is_err());
+        assert!(parse_kind("unknown").is_err());
+    }
+
+    #[test]
+    fn compile_excludes_rejects_bad_regex() {
+        assert!(compile_excludes(vec!["(".to_string()]).is_err());
+        assert_eq!(compile_excludes(vec![]).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn is_excluded_matches() {
+        let re = Regex::new("secret").unwrap();
+        assert!(is_excluded(Path::new("/tmp/secret.rs"), &[re]));
+    }
+
+    #[test]
+    fn byte_to_line_col_and_span_text() {
+        let src = "a\nbc\ndef";
+        assert_eq!(byte_to_line_col(src, 0), (1, 0));
+        assert_eq!(byte_to_line_col(src, 3), (2, 1));
+        assert_eq!(span_text(src, 100, 200), "");
+        assert_eq!(span_text(src, 2, 4), "bc");
+    }
+
+    #[test]
+    fn format_kind_variants() {
+        assert_eq!(
+            format_kind(UnifiedKind::FunctionDefinition),
+            "FunctionDefinition"
+        );
+        assert_eq!(format_kind(UnifiedKind::If), "If");
+        assert!(format_kind(UnifiedKind::Loop(LoopKind::While)).starts_with("Loop"));
+    }
+
+    #[test]
+    fn collect_paths_skips_non_file_dir() {
+        let tmp = std::env::temp_dir().join(format!(
+            "tree_lang_py_collect_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&tmp).unwrap();
+        let rust_file = tmp.join("x.rs");
+        fs::write(&rust_file, "fn x() {}\n").unwrap();
+        let paths = vec![rust_file.to_string_lossy().to_string()];
+        let got = collect_paths(&paths, Language::Rust, &[]).unwrap();
+        assert_eq!(got, vec![rust_file]);
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn find_in_source_via_python_gil() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let out = find_in_source(py, "fn f() {}", "rust", "function_definition").unwrap();
+            assert_eq!(out.len(), 1);
+            use pyo3::types::PyAnyMethods;
+            let obj = out[0].clone_ref(py).into_bound(py);
+            let kind: String = obj.get_item("kind").unwrap().extract().unwrap();
+            assert_eq!(kind, "FunctionDefinition");
+        });
+    }
+
+    #[test]
+    fn find_in_paths_empty_is_err() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert!(find_in_paths(py, vec![], "rust", "function_definition", None).is_err());
+        });
+    }
+
+    #[test]
+    fn find_in_paths_reads_temp_file() {
+        pyo3::prepare_freethreaded_python();
+        let tmp = std::env::temp_dir().join(format!(
+            "tree_lang_py_paths_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&tmp).unwrap();
+        let f = tmp.join("m.rs");
+        fs::write(&f, "fn m() {}\n").unwrap();
+        Python::with_gil(|py| {
+            let out = find_in_paths(
+                py,
+                vec![f.to_string_lossy().to_string()],
+                "rust",
+                "function_definition",
+                None,
+            )
+            .unwrap();
+            assert_eq!(out.len(), 1);
+        });
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn pymodule_registers_exports() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let m = PyModule::new_bound(py, "tree_lang").unwrap();
+            tree_lang_py(&m).unwrap();
+            assert!(m.getattr("find_in_source").is_ok());
+        });
+    }
+}
