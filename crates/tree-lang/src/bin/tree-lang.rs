@@ -43,6 +43,9 @@ struct FindArgs {
     /// Match any function parameter type by regular expression (repeatable).
     #[arg(short = 't', long = "param-type", value_name = "REGEX")]
     param_type: Vec<String>,
+    /// Match function return type by regular expression (repeatable).
+    #[arg(short = 'r', long = "return-type", value_name = "REGEX")]
+    return_type: Vec<String>,
     /// Match function parameter name at index: <IDX:REGEX> (repeatable, 0-indexed).
     #[arg(long = "param-name-at", value_name = "IDX:REGEX")]
     param_name_at: Vec<String>,
@@ -140,6 +143,13 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
+    let return_type_regexes: Vec<Regex> = match args.return_type.iter().map(|p| Regex::new(p)).collect() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: invalid --return-type regex: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
     let indexed_param_name = match parse_indexed_regexes(&args.param_name_at, "--param-name-at") {
         Ok(v) => v,
         Err(e) => {
@@ -158,11 +168,12 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
     let uses_function_filters = name_regex.is_some()
         || !param_name_regexes.is_empty()
         || !param_type_regexes.is_empty()
+        || !return_type_regexes.is_empty()
         || !indexed_param_name.is_empty()
         || !indexed_param_type.is_empty();
     if uses_function_filters && !supports_name_filter(&kinds) {
         eprintln!(
-            "error: --name/--param-name/--param-type/--param-name-at/--param-type-at are currently supported only with --kind function_definition"
+            "error: --name/--param-name/--param-type/--return-type/--param-name-at/--param-type-at are currently supported only with --kind function_definition"
         );
         return std::process::ExitCode::from(2);
     }
@@ -202,6 +213,7 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
             name_regex.as_ref(),
             &param_name_regexes,
             &param_type_regexes,
+            &return_type_regexes,
             &indexed_param_name,
             &indexed_param_type,
             print_fields.as_deref(),
@@ -228,6 +240,7 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
             name_regex.as_ref(),
             &param_name_regexes,
             &param_type_regexes,
+            &return_type_regexes,
             &indexed_param_name,
             &indexed_param_type,
             print_fields.as_deref(),
@@ -253,6 +266,7 @@ fn process_source(
     name_regex: Option<&Regex>,
     param_name_regexes: &[Regex],
     param_type_regexes: &[Regex],
+    return_type_regexes: &[Regex],
     indexed_param_name: &[IndexedRegex],
     indexed_param_type: &[IndexedRegex],
     print_fields: Option<&[PrintField]>,
@@ -274,6 +288,7 @@ fn process_source(
                 name_regex,
                 param_name_regexes,
                 param_type_regexes,
+                return_type_regexes,
                 indexed_param_name,
                 indexed_param_type,
             )
@@ -353,6 +368,7 @@ fn function_matches(
     name: Option<&Regex>,
     param_name: &[Regex],
     param_type: &[Regex],
+    return_type: &[Regex],
     param_name_at: &[IndexedRegex],
     param_type_at: &[IndexedRegex],
 ) -> bool {
@@ -372,6 +388,11 @@ fn function_matches(
             .iter()
             .any(|p| re.is_match(p.ty.as_deref().unwrap_or("")))
         {
+            return false;
+        }
+    }
+    for re in return_type {
+        if !re.is_match(f.return_type.as_deref().unwrap_or("")) {
             return false;
         }
     }

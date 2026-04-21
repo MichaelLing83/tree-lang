@@ -104,6 +104,39 @@ fn find_supports_parameter_filters() {
 }
 
 #[test]
+fn find_supports_return_type_filter() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-l",
+        "rust",
+        "-k",
+        "function_definition",
+        "--return-type",
+        "^i32$",
+        "--print-format",
+        "{name}",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"fn keep() -> i32 { 1 }\nfn skip() -> bool { false }\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("keep"), "stdout: {stdout}");
+    assert!(!stdout.contains("skip"), "stdout: {stdout}");
+}
+
+#[test]
 fn find_supports_print_and_print_format() {
     let rust_file = data_path("rust/rustc_parse_expr.rs");
 

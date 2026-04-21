@@ -46,6 +46,7 @@ pub struct FunctionDefinitionNode {
     pub span: Span,
     pub name: String,
     pub parameters: Vec<FunctionParameter>,
+    pub return_type: Option<String>,
 }
 
 /// One function parameter with normalized name and optional type text.
@@ -128,10 +129,12 @@ fn walk_function_definitions(
         if m.kind == UnifiedKind::FunctionDefinition {
             if let Some(name) = extract_function_name(language, node, source) {
                 let parameters = extract_function_parameters(language, node, source);
+                let return_type = extract_function_return_type(language, node, source);
                 out.push(FunctionDefinitionNode {
                     span,
                     name,
                     parameters,
+                    return_type,
                 });
             }
         }
@@ -175,6 +178,27 @@ fn extract_function_parameters(
         Language::Rust => extract_rust_parameters(parameters_node, source),
         Language::Python => extract_python_parameters(parameters_node, source),
         Language::Java => extract_java_parameters(parameters_node, source),
+    }
+}
+
+fn extract_function_return_type(language: Language, node: Node<'_>, source: &[u8]) -> Option<String> {
+    let normalize = |raw: String| {
+        let trimmed = raw.trim();
+        let without_arrow = trimmed.strip_prefix("->").map(str::trim).unwrap_or(trimmed);
+        if without_arrow.is_empty() {
+            None
+        } else {
+            Some(without_arrow.to_string())
+        }
+    };
+    match language {
+        Language::Rust | Language::Python => node
+            .child_by_field_name("return_type")
+            .and_then(|n| node_text(n, source))
+            .and_then(normalize),
+        Language::Java | Language::C | Language::Cpp => {
+            node.child_by_field_name("type").and_then(|n| node_text(n, source))
+        }
     }
 }
 
