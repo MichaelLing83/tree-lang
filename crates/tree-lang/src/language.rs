@@ -9,6 +9,22 @@ pub enum Language {
 }
 
 impl Language {
+    /// Detect language from file path extension.
+    pub fn detect_from_path(path: &std::path::Path) -> Option<Self> {
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())?;
+        match ext.as_str() {
+            "c" | "h" => Some(Self::C),
+            "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" => Some(Self::Cpp),
+            "java" => Some(Self::Java),
+            "py" => Some(Self::Python),
+            "rs" => Some(Self::Rust),
+            _ => None,
+        }
+    }
+
     /// Returns the tree-sitter [`tree_sitter::Language`] for this variant.
     pub fn tree_sitter_language(self) -> tree_sitter::Language {
         use Language::*;

@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -220,6 +221,37 @@ fn find_supports_stdin_input() {
 }
 
 #[test]
+fn find_stdin_requires_explicit_language_when_default_is_auto() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-k",
+        "function_definition",
+        "-n",
+        "^parse_x$",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"fn parse_x(a: i32) {}\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(!out.status.success(), "expected failure, stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--language auto cannot be used with stdin"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
 fn find_rejects_invalid_flag_combination() {
     let rust_file = data_path("rust/rustc_parse_expr.rs");
     let out = bin_cmd()
@@ -239,4 +271,48 @@ fn find_rejects_invalid_flag_combination() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--print and --print-format cannot be used together"));
+}
+
+#[test]
+fn find_auto_detects_supported_language_and_skips_unsupported() {
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "tree_lang_auto_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&tmp_dir).expect("create temp dir");
+    let rust_file = tmp_dir.join("ok.rs");
+    let text_file = tmp_dir.join("skip.txt");
+    fs::write(&rust_file, "fn auto_ok() -> i32 { 1 }\n").expect("write rust fixture");
+    fs::write(&text_file, "not code\n").expect("write unsupported fixture");
+
+    let out = bin_cmd()
+        .args([
+            "find",
+            tmp_dir.to_str().expect("utf8 path"),
+            "-l",
+            "auto",
+            "-k",
+            "function_definition",
+            "-n",
+            "^auto_ok$",
+            "--print-format",
+            "{name}",
+        ])
+        .output()
+        .expect("run tree-lang find with --language auto");
+
+    fs::remove_dir_all(&tmp_dir).expect("cleanup temp dir");
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("auto_ok"), "stdout: {stdout}");
+    assert!(
+        stderr.contains("unsupported language for --language auto; skipping"),
+        "stderr: {stderr}"
+    );
 }

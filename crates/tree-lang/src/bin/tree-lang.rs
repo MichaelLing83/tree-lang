@@ -28,8 +28,8 @@ struct FindArgs {
     /// Exclude paths whose string form matches this regular expression (repeatable).
     #[arg(short = 'e', long = "exclude", value_name = "REGEX")]
     exclude: Vec<String>,
-    /// Target language: c, cpp, java, python, rust.
-    #[arg(short = 'l', long = "language", value_name = "LANG")]
+    /// Target language: c, cpp, java, python, rust, auto (default: auto).
+    #[arg(short = 'l', long = "language", value_name = "LANG", default_value = "auto")]
     language: String,
     /// Unified syntax kind: function_definition, if, loop, or loop:for / loop:while / …
     #[arg(short = 'k', long = "kind", value_name = "KIND")]
@@ -68,6 +68,12 @@ struct FindArgs {
     print_format: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum LanguageSelector {
+    Explicit(Language),
+    Auto,
+}
+
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     match cli.command {
@@ -96,8 +102,8 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     }
 
-    let language: Language = match args.language.parse() {
-        Ok(l) => l,
+    let language_selector = match parse_language_selector(&args.language) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("error: {e}");
             return std::process::ExitCode::from(2);
@@ -185,7 +191,11 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
             use_stdin = true;
             continue;
         }
-        match collect_targets(root, language, &exclude) {
+        let collected = match language_selector {
+            LanguageSelector::Explicit(language) => collect_targets(root, language, &exclude),
+            LanguageSelector::Auto => collect_targets_auto(root, &exclude),
+        };
+        match collected {
             Ok(mut v) => files.append(&mut v),
             Err(e) => {
                 eprintln!("error: {}: {e}", root.display());
@@ -199,11 +209,19 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
 
     let mut had_error = false;
     if use_stdin {
+        if matches!(language_selector, LanguageSelector::Auto) {
+            eprintln!("error: --language auto cannot be used with stdin; pass an explicit language");
+            return std::process::ExitCode::from(2);
+        }
         let mut source = String::new();
         if let Err(e) = std::io::stdin().read_to_string(&mut source) {
             eprintln!("<stdin>: read error: {e}");
             return std::process::ExitCode::from(1);
         }
+        let language = match language_selector {
+            LanguageSelector::Explicit(l) => l,
+            LanguageSelector::Auto => unreachable!("guarded above"),
+        };
         process_source(
             Path::new("<stdin>"),
             &source,
@@ -223,6 +241,19 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
     }
 
     for path in files {
+        let language = match language_selector {
+            LanguageSelector::Explicit(l) => l,
+            LanguageSelector::Auto => {
+                let Some(detected) = Language::detect_from_path(&path) else {
+                    eprintln!(
+                        "warning: {}: unsupported language for --language auto; skipping",
+                        path.display()
+                    );
+                    continue;
+                };
+                detected
+            }
+        };
         let source = match fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
@@ -415,6 +446,14 @@ fn function_matches(
     true
 }
 
+fn parse_language_selector(raw: &str) -> Result<LanguageSelector, String> {
+    if raw.trim().eq_ignore_ascii_case("auto") {
+        Ok(LanguageSelector::Auto)
+    } else {
+        raw.parse::<Language>().map(LanguageSelector::Explicit)
+    }
+}
+
 fn collect_targets(
     root: &Path,
     language: Language,
@@ -451,6 +490,35 @@ fn collect_targets(
             if exts.contains(&ext) {
                 out.push(path);
             }
+        }
+        return Ok(out);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "not a file or directory",
+    ))
+}
+
+fn collect_targets_auto(root: &Path, exclude: &[Regex]) -> Result<Vec<PathBuf>, std::io::Error> {
+    let mut out = Vec::new();
+    let meta = fs::metadata(root)?;
+    if meta.is_file() {
+        if !is_excluded(root, exclude) {
+            out.push(root.to_path_buf());
+        }
+        return Ok(out);
+    }
+    if meta.is_dir() {
+        for entry in WalkDir::new(root).follow_links(false) {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path().to_path_buf();
+            if is_excluded(&path, exclude) {
+                continue;
+            }
+            out.push(path);
         }
         return Ok(out);
     }
