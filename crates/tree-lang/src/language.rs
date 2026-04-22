@@ -37,6 +37,17 @@ impl Language {
         }
     }
 
+    /// Stable spelling for CLI `-l` and `{language}` in `--print-format` (lowercase).
+    pub fn as_cli_name(self) -> &'static str {
+        match self {
+            Language::C => "c",
+            Language::Cpp => "cpp",
+            Language::Java => "java",
+            Language::Python => "python",
+            Language::Rust => "rust",
+        }
+    }
+
     /// CLI / config spellings (case-insensitive).
     pub fn parse_cli_name(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {

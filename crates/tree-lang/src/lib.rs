@@ -47,6 +47,7 @@ pub struct FunctionDefinitionNode {
     pub name: String,
     pub parameters: Vec<FunctionParameter>,
     pub return_type: Option<String>,
+    pub body: Option<Span>,
 }
 
 /// One function parameter with normalized name and optional type text.
@@ -103,7 +104,8 @@ pub fn find_function_definitions(
 
 fn walk(language: Language, node: Node<'_>, out: &mut Vec<MappedNode>, kinds: Option<&[UnifiedKind]>) {
     let span = Span::new(node.range().start_byte, node.range().end_byte);
-    if let Some(m) = classify(language, node.kind(), span) {
+    if let Some(mut m) = classify(language, node.kind(), span) {
+        m.body = unified_body_span(language, node, m.kind);
         let matched = match kinds {
             Some(filters) => filters.contains(&m.kind),
             None => true,
@@ -130,11 +132,13 @@ fn walk_function_definitions(
             if let Some(name) = extract_function_name(language, node, source) {
                 let parameters = extract_function_parameters(language, node, source);
                 let return_type = extract_function_return_type(language, node, source);
+                let body = unified_body_span(language, node, UnifiedKind::FunctionDefinition);
                 out.push(FunctionDefinitionNode {
                     span,
                     name,
                     parameters,
                     return_type,
+                    body,
                 });
             }
         }
@@ -155,6 +159,19 @@ fn extract_function_name(language: Language, node: Node<'_>, source: &[u8]) -> O
             let declarator = node.child_by_field_name("declarator")?;
             extract_c_like_declarator_name(declarator, source)
         }
+    }
+}
+
+fn span_from_field(node: Node<'_>, field: &str) -> Option<Span> {
+    let n = node.child_by_field_name(field)?;
+    Some(Span::new(n.range().start_byte, n.range().end_byte))
+}
+
+/// Primary body span for unified kinds: `body` for functions/loops, `consequence` for `if` when present.
+fn unified_body_span(_language: Language, node: Node<'_>, kind: UnifiedKind) -> Option<Span> {
+    match kind {
+        UnifiedKind::If => span_from_field(node, "consequence").or_else(|| span_from_field(node, "body")),
+        UnifiedKind::FunctionDefinition | UnifiedKind::Loop(_) => span_from_field(node, "body"),
     }
 }
 

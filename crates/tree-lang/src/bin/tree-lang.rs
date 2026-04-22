@@ -53,7 +53,7 @@ struct FindArgs {
     #[arg(long = "param-type-at", value_name = "IDX:REGEX")]
     param_type_at: Vec<String>,
     /// Print selected output fields: all or comma-separated fields.
-    /// Fields: file,type,start,end,content
+    /// Fields: file,type,start,end,content,body,language,start_byte,end_byte
     /// `--print` (without value) is equivalent to `--print all`.
     #[arg(
         long = "print",
@@ -63,7 +63,7 @@ struct FindArgs {
     )]
     print: Option<String>,
     /// Print using a format template.
-    /// Supported placeholders: {file},{type},{start},{end},{range},{name},{content}
+    /// Supported placeholders: {file},{type},{start},{end},{range},{name},{content},{body},{language},{start_byte},{end_byte}
     #[arg(long = "print-format", value_name = "TEMPLATE")]
     print_format: Option<String>,
 }
@@ -326,15 +326,27 @@ fn process_source(
         }) {
             let (sl, sc) = byte_to_line_col(source, f.span.start_byte);
             let (el, ec) = byte_to_line_col(source, f.span.end_byte);
+            let escaped_body = f
+                .body
+                .map(|b| {
+                    span_text(source, b.start_byte, b.end_byte)
+                        .escape_default()
+                        .to_string()
+                })
+                .unwrap_or_default();
             print_match_line(
                 path,
+                language,
                 &format_kind(UnifiedKind::FunctionDefinition),
                 sl,
                 sc,
                 el,
                 ec,
+                f.span.start_byte,
+                f.span.end_byte,
                 Some(&f.name),
                 span_text(source, f.span.start_byte, f.span.end_byte),
+                &escaped_body,
                 print_fields,
                 print_format,
             );
@@ -351,15 +363,27 @@ fn process_source(
         for m in matches {
             let (sl, sc) = byte_to_line_col(source, m.span.start_byte);
             let (el, ec) = byte_to_line_col(source, m.span.end_byte);
+            let escaped_body = m
+                .body
+                .map(|b| {
+                    span_text(source, b.start_byte, b.end_byte)
+                        .escape_default()
+                        .to_string()
+                })
+                .unwrap_or_default();
             print_match_line(
                 path,
+                language,
                 &format_kind(m.kind),
                 sl,
                 sc,
                 el,
                 ec,
+                m.span.start_byte,
+                m.span.end_byte,
                 None,
                 span_text(source, m.span.start_byte, m.span.end_byte),
+                &escaped_body,
                 print_fields,
                 print_format,
             );
@@ -600,13 +624,17 @@ fn span_text(source: &str, start: usize, end: usize) -> String {
 
 fn print_match_line(
     path: &Path,
+    language: Language,
     kind: &str,
     sl: usize,
     sc: usize,
     el: usize,
     ec: usize,
+    start_byte: usize,
+    end_byte: usize,
     name: Option<&str>,
     node_text: String,
+    escaped_body: &str,
     print_fields: Option<&[PrintField]>,
     print_format: Option<&str>,
 ) {
@@ -615,6 +643,9 @@ fn print_match_line(
     let end = format!("{el}:{ec}");
     let escaped_content = node_text.escape_default().to_string();
     let file = path.display().to_string();
+    let lang = language.as_cli_name();
+    let sb = start_byte.to_string();
+    let se = end_byte.to_string();
 
     if let Some(template) = print_format {
         let rendered = render_template(
@@ -626,6 +657,10 @@ fn print_match_line(
             &range,
             name.unwrap_or(""),
             &escaped_content,
+            escaped_body,
+            lang,
+            &sb,
+            &se,
         );
         println!("{rendered}");
         return;
@@ -640,6 +675,10 @@ fn print_match_line(
                 PrintField::Start => cols.push(start.clone()),
                 PrintField::End => cols.push(end.clone()),
                 PrintField::Content => cols.push(escaped_content.clone()),
+                PrintField::Body => cols.push(escaped_body.to_string()),
+                PrintField::Language => cols.push(lang.to_string()),
+                PrintField::StartByte => cols.push(sb.clone()),
+                PrintField::EndByte => cols.push(se.clone()),
             }
         }
         println!("{}", cols.join("\t"));
@@ -669,6 +708,10 @@ fn render_template(
     range: &str,
     name: &str,
     content: &str,
+    body: &str,
+    language: &str,
+    start_byte: &str,
+    end_byte: &str,
 ) -> String {
     template
         .replace("{file}", file)
@@ -678,6 +721,10 @@ fn render_template(
         .replace("{range}", range)
         .replace("{name}", name)
         .replace("{content}", content)
+        .replace("{body}", body)
+        .replace("{language}", language)
+        .replace("{start_byte}", start_byte)
+        .replace("{end_byte}", end_byte)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -687,6 +734,10 @@ enum PrintField {
     Start,
     End,
     Content,
+    Body,
+    Language,
+    StartByte,
+    EndByte,
 }
 
 fn parse_print_fields(raw: &str) -> Result<Vec<PrintField>, String> {
@@ -698,6 +749,10 @@ fn parse_print_fields(raw: &str) -> Result<Vec<PrintField>, String> {
             PrintField::Start,
             PrintField::End,
             PrintField::Content,
+            PrintField::Body,
+            PrintField::Language,
+            PrintField::StartByte,
+            PrintField::EndByte,
         ]);
     }
     if normalized.is_empty() {
@@ -713,9 +768,13 @@ fn parse_print_fields(raw: &str) -> Result<Vec<PrintField>, String> {
             "start" => PrintField::Start,
             "end" => PrintField::End,
             "content" => PrintField::Content,
+            "body" => PrintField::Body,
+            "language" => PrintField::Language,
+            "start_byte" => PrintField::StartByte,
+            "end_byte" => PrintField::EndByte,
             _ => {
                 return Err(format!(
-                    "unknown field {token:?}; expected one of file,type,start,end,content or all"
+                    "unknown field {token:?}; expected one of file,type,start,end,content,body,language,start_byte,end_byte or all"
                 ));
             }
         };

@@ -44,6 +44,7 @@ fn find_in_source(
         let (sl, sc) = byte_to_line_col(source, m.span.start_byte);
         let (el, ec) = byte_to_line_col(source, m.span.end_byte);
         d.set_item("kind", format_kind(m.kind))?;
+        d.set_item("language", language.as_cli_name())?;
         d.set_item("start_byte", m.span.start_byte)?;
         d.set_item("end_byte", m.span.end_byte)?;
         d.set_item("start_line", sl)?;
@@ -51,6 +52,11 @@ fn find_in_source(
         d.set_item("end_line", el)?;
         d.set_item("end_col", ec)?;
         d.set_item("content", span_text(source, m.span.start_byte, m.span.end_byte))?;
+        if let Some(b) = m.body {
+            d.set_item("body", span_text(source, b.start_byte, b.end_byte))?;
+        } else {
+            d.set_item("body", py.None())?;
+        }
         out.push(d.into_any().unbind());
     }
     Ok(out)
@@ -85,6 +91,7 @@ fn find_in_paths(
             let (el, ec) = byte_to_line_col(&source, m.span.end_byte);
             d.set_item("file", path.to_string_lossy().to_string())?;
             d.set_item("kind", format_kind(m.kind))?;
+            d.set_item("language", language.as_cli_name())?;
             d.set_item("start_byte", m.span.start_byte)?;
             d.set_item("end_byte", m.span.end_byte)?;
             d.set_item("start_line", sl)?;
@@ -92,6 +99,11 @@ fn find_in_paths(
             d.set_item("end_line", el)?;
             d.set_item("end_col", ec)?;
             d.set_item("content", span_text(&source, m.span.start_byte, m.span.end_byte))?;
+            if let Some(b) = m.body {
+                d.set_item("body", span_text(&source, b.start_byte, b.end_byte))?;
+            } else {
+                d.set_item("body", py.None())?;
+            }
             out.push(d.into_any().unbind());
         }
     }

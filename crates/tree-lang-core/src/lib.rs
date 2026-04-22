@@ -41,11 +41,18 @@ pub enum UnifiedKind {
 pub struct MappedNode {
     pub kind: UnifiedKind,
     pub span: Span,
+    /// Spans the construct's primary executable body when the grammar exposes it
+    /// (e.g. `body` on functions/loops, `consequence` for `if` then-branches). `None` if missing.
+    pub body: Option<Span>,
 }
 
 impl MappedNode {
     #[inline]
     pub fn new(kind: UnifiedKind, span: Span) -> Self {
-        Self { kind, span }
+        Self {
+            kind,
+            span,
+            body: None,
+        }
     }
 }
