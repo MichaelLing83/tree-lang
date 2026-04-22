@@ -6,7 +6,10 @@ use clap::{Args, Parser, Subcommand};
 use regex::Regex;
 use walkdir::WalkDir;
 
-use tree_lang::{find_function_definitions, find_unified_kinds, Language, LoopKind, UnifiedKind};
+use tree_lang::{find_function_definitions, find_unified_kinds, Language, LoopKind, MappedNode, UnifiedKind};
+
+#[path = "../internal/pipeline.rs"]
+mod pipeline;
 
 #[derive(Parser)]
 #[command(name = "tree-lang", version, about = "Unified syntax search over source trees")]
@@ -66,6 +69,20 @@ struct FindArgs {
     /// Supported placeholders: {file},{type},{start},{end},{range},{name},{content},{body},{language},{start_byte},{end_byte},{body_start_byte},{body_end_byte}
     #[arg(long = "print-format", value_name = "TEMPLATE")]
     print_format: Option<String>,
+    /// Ordered find pipeline. Repeat; order matters. Each value uses one of:
+    /// `assign:NAME:SOURCE` or `a:...` (from current: node, body, or consequence for if);
+    /// `has:VAR:KIND` or `h:...` (first match of KIND inside span VAR, then current = that node);
+    /// `is:VAR:KIND` or `i:...` (span VAR must parse as a unified root of that kind covering the
+    /// whole text — structural, not "contains");
+    /// `print:TEMPLATE` or `p:...` (one line: bindings `{name}` then `find` template fields).
+    /// Not valid with `function_definition` filters. Example:
+    /// `--step assign:ob:body --step has:ob:loop:for --step 'print:{file} {type}'`
+    #[arg(
+        long = "step",
+        value_name = "STEP",
+        action = clap::ArgAction::Append
+    )]
+    step: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,6 +118,19 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
         eprintln!("error: --print and --print-format cannot be used together");
         return std::process::ExitCode::from(2);
     }
+
+    let pipeline_steps: Option<Vec<pipeline::PipelineStep>> = if args.step.is_empty() {
+        None
+    } else {
+        match pipeline::parse_steps(&args.step) {
+            Ok(s) if s.is_empty() => None,
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("error: invalid --step: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    };
 
     let language_selector = match parse_language_selector(&args.language) {
         Ok(v) => v,
@@ -183,6 +213,10 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
         );
         return std::process::ExitCode::from(2);
     }
+    if pipeline_steps.is_some() && uses_function_filters {
+        eprintln!("error: --step pipeline is not supported with function_definition filters (yet)");
+        return std::process::ExitCode::from(2);
+    }
 
     let mut files = Vec::new();
     let mut use_stdin = false;
@@ -236,6 +270,7 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
             &indexed_param_type,
             print_fields.as_deref(),
             args.print_format.as_deref(),
+            pipeline_steps.as_deref(),
             &mut had_error,
         );
     }
@@ -276,6 +311,7 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
             &indexed_param_type,
             print_fields.as_deref(),
             args.print_format.as_deref(),
+            pipeline_steps.as_deref(),
             &mut had_error,
         );
     }
@@ -302,6 +338,7 @@ fn process_source(
     indexed_param_type: &[IndexedRegex],
     print_fields: Option<&[PrintField]>,
     print_format: Option<&str>,
+    pipeline: Option<&[pipeline::PipelineStep]>,
     had_error: &mut bool,
 ) {
     if uses_function_filters {
@@ -367,42 +404,69 @@ fn process_source(
                 return;
             }
         };
-        for m in matches {
-            let (sl, sc) = byte_to_line_col(source, m.span.start_byte);
-            let (el, ec) = byte_to_line_col(source, m.span.end_byte);
-            let escaped_body = m
-                .body
-                .map(|b| {
-                    span_text(source, b.start_byte, b.end_byte)
-                        .escape_default()
-                        .to_string()
-                })
-                .unwrap_or_default();
-            let body_start_byte = m
-                .body
-                .map(|b| b.start_byte.to_string())
-                .unwrap_or_default();
-            let body_end_byte = m.body.map(|b| b.end_byte.to_string()).unwrap_or_default();
-            print_match_line(
-                path,
-                language,
-                &format_kind(m.kind),
-                sl,
-                sc,
-                el,
-                ec,
-                m.span.start_byte,
-                m.span.end_byte,
-                None,
-                span_text(source, m.span.start_byte, m.span.end_byte),
-                &escaped_body,
-                &body_start_byte,
-                &body_end_byte,
-                print_fields,
-                print_format,
-            );
+        if let Some(steps) = pipeline {
+            for m in &matches {
+                match pipeline::run_unified_pipeline(path, source, language, m, steps) {
+                    Ok(Some(out)) if out.need_default_print => {
+                        print_unified(path, source, language, m, print_fields, print_format);
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("{}: {e}", path.display());
+                        *had_error = true;
+                    }
+                }
+            }
+        } else {
+            for m in matches {
+                print_unified(path, source, language, &m, print_fields, print_format);
+            }
         }
     }
+}
+
+fn print_unified(
+    path: &Path,
+    source: &str,
+    language: Language,
+    m: &MappedNode,
+    print_fields: Option<&[PrintField]>,
+    print_format: Option<&str>,
+) {
+    let (sl, sc) = byte_to_line_col(source, m.span.start_byte);
+    let (el, ec) = byte_to_line_col(source, m.span.end_byte);
+    let escaped_body = m
+        .body
+        .map(|b| {
+            span_text(source, b.start_byte, b.end_byte)
+                .escape_default()
+                .to_string()
+        })
+        .unwrap_or_default();
+    let body_start_byte = m
+        .body
+        .map(|b| b.start_byte.to_string())
+        .unwrap_or_default();
+    let body_end_byte = m.body.map(|b| b.end_byte.to_string()).unwrap_or_default();
+    print_match_line(
+        path,
+        language,
+        &format_kind(m.kind),
+        sl,
+        sc,
+        el,
+        ec,
+        m.span.start_byte,
+        m.span.end_byte,
+        None,
+        span_text(source, m.span.start_byte, m.span.end_byte),
+        &escaped_body,
+        &body_start_byte,
+        &body_end_byte,
+        print_fields,
+        print_format,
+    );
 }
 
 fn supports_name_filter(kinds: &[UnifiedKind]) -> bool {
@@ -571,7 +635,7 @@ fn is_excluded(path: &Path, exclude: &[Regex]) -> bool {
     exclude.iter().any(|re| re.is_match(s.as_ref()))
 }
 
-fn kinds_from_cli(s: &str) -> Result<Vec<UnifiedKind>, String> {
+pub(crate) fn kinds_from_cli(s: &str) -> Result<Vec<UnifiedKind>, String> {
     let normalized = s.trim().to_ascii_lowercase().replace('-', "_");
     if let Some(sub) = normalized.strip_prefix("loop:") {
         let lk = match sub {
@@ -606,7 +670,7 @@ fn kinds_from_cli(s: &str) -> Result<Vec<UnifiedKind>, String> {
     }
 }
 
-fn format_kind(k: UnifiedKind) -> String {
+pub(crate) fn format_kind(k: UnifiedKind) -> String {
     match k {
         UnifiedKind::FunctionDefinition => "FunctionDefinition".to_string(),
         UnifiedKind::If => "If".to_string(),
@@ -615,7 +679,7 @@ fn format_kind(k: UnifiedKind) -> String {
 }
 
 /// 1-based line, 0-based UTF-8 column within that line (byte offset from line start).
-fn byte_to_line_col(source: &str, byte: usize) -> (usize, usize) {
+pub(crate) fn byte_to_line_col(source: &str, byte: usize) -> (usize, usize) {
     let byte = byte.min(source.len());
     let prefix = &source[..byte];
     let line = prefix.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1;
@@ -626,7 +690,7 @@ fn byte_to_line_col(source: &str, byte: usize) -> (usize, usize) {
     (line, col)
 }
 
-fn span_text(source: &str, start: usize, end: usize) -> String {
+pub(crate) fn span_text(source: &str, start: usize, end: usize) -> String {
     let s = start.min(source.len());
     let e = end.min(source.len());
     if s >= e {
@@ -719,7 +783,7 @@ fn print_match_line(
     }
 }
 
-fn render_template(
+pub(crate) fn render_template(
     template: &str,
     file: &str,
     kind: &str,

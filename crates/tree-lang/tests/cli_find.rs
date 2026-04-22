@@ -138,6 +138,72 @@ fn find_supports_return_type_filter() {
 }
 
 #[test]
+fn find_supports_pipeline_step() {
+    let c_file = data_path("c/libgit2_repository.c");
+    let out = bin_cmd()
+        .args([
+            "find",
+            c_file.to_str().expect("utf8 path"),
+            "-l",
+            "c",
+            "-k",
+            "loop",
+            "--step",
+            "assign:ob:body",
+            "--step",
+            "has:ob:loop",
+            "--step",
+            "print:pipeline-ok",
+        ])
+        .output()
+        .expect("run tree-lang find with --step pipeline");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("pipeline-ok"),
+        "expected pipeline print, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn find_supports_pipeline_is_step() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-l",
+        "c",
+        "-k",
+        "loop",
+        "--step",
+        "assign:x:node",
+        "--step",
+        "is:x:loop",
+        "--step",
+        "print:IS-OK",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"for(;;) {}")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("IS-OK"), "stdout: {stdout}");
+}
+
+#[test]
 fn find_supports_print_and_print_format() {
     let rust_file = data_path("rust/rustc_parse_expr.rs");
 

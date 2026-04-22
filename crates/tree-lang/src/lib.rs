@@ -91,6 +91,35 @@ pub fn find_unified_kinds(
     Ok(extract_unified_kinds(language, &tree, kinds))
 }
 
+/// Classify a single tree-sitter node as a [`MappedNode`], same rules as a depth-first find hit
+/// (including `body` / consequence spans when present).
+pub fn map_unified_node(language: Language, node: &Node<'_>) -> Option<MappedNode> {
+    let span = Span::new(node.range().start_byte, node.range().end_byte);
+    let mut m = classify(language, node.kind(), span)?;
+    m.body = unified_body_span(language, *node, m.kind);
+    Some(m)
+}
+
+/// If some unified node whose span is exactly `0..source.len()` is in `kinds`, return it: first
+/// try the parse **root** (e.g. the whole text is one `for_statement`); else the single match
+/// from the same walk `find_unified_kinds` would use (e.g. root is `translation_unit` with one
+/// `for_statement` child). Used for `find` pipeline `is:VAR:KIND` (whole text is that construct,
+/// not merely "contains" it).
+pub fn match_root_as_unified(language: Language, source: &str, kinds: &[UnifiedKind]) -> Option<MappedNode> {
+    let len = source.len();
+    let tree = parse(language, source).ok()?;
+    let root = tree.root_node();
+    if let Some(m) = map_unified_node(language, &root) {
+        if m.span.start_byte == 0 && m.span.end_byte == len && kinds.iter().any(|k| *k == m.kind) {
+            return Some(m);
+        }
+    }
+    find_unified_kinds(language, source, kinds)
+        .ok()?
+        .into_iter()
+        .find(|m| m.span.start_byte == 0 && m.span.end_byte == len)
+}
+
 /// Parse source and return function-definition nodes with extracted names.
 pub fn find_function_definitions(
     language: Language,
