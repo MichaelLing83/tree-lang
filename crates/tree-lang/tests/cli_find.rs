@@ -189,6 +189,42 @@ fn find_supports_print_and_print_format() {
 }
 
 #[test]
+fn find_print_format_supports_body_byte_placeholders() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-l",
+        "rust",
+        "-k",
+        "function_definition",
+        "-n",
+        "^f$",
+        "--print-format",
+        "{body_start_byte}|{body_end_byte}",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"fn f() -> i32 {\n  1\n}\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let first = stdout.lines().next().expect("one line");
+    let mut parts = first.split('|');
+    let b0: usize = parts.next().expect("a").parse().expect("start");
+    let b1: usize = parts.next().expect("b").parse().expect("end");
+    assert!(b1 > b0, "body span should be non-empty: {first}");
+}
+
+#[test]
 fn find_print_format_supports_body_placeholder() {
     let mut cmd = bin_cmd();
     cmd.args([
