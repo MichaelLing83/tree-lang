@@ -6,7 +6,10 @@ use clap::{Args, Parser, Subcommand};
 use regex::Regex;
 use walkdir::WalkDir;
 
-use tree_lang::{find_function_definitions, find_unified_kinds, Language, LoopKind, MappedNode, UnifiedKind};
+use tree_lang::{
+    find_function_definitions, find_unified_kinds, for_each_subtree_node, map_unified_node, parse,
+    Language, LoopKind, MappedNode, TreeTraversal, UnifiedKind,
+};
 
 #[path = "../internal/pipeline.rs"]
 mod pipeline;
@@ -18,10 +21,55 @@ struct Cli {
     command: Command,
 }
 
+/// Shared flags for `dfs_preorder` / `dfs_postorder` / `bfs_ltr` / `bfs_rtl` (file selection and pipeline).
+#[derive(Args)]
+struct TraverseArgs {
+    /// One or more files or directories to read.
+    paths: Vec<PathBuf>,
+    /// Exclude paths whose string form matches this regular expression (repeatable).
+    #[arg(short = 'e', long = "exclude", value_name = "REGEX")]
+    exclude: Vec<String>,
+    /// Target language: c, cpp, java, python, rust, auto (default: auto).
+    #[arg(short = 'l', long = "language", value_name = "LANG", default_value = "auto")]
+    language: String,
+    /// Print selected output fields: all or comma-separated fields (same as `find`).
+    #[arg(
+        long = "print",
+        value_name = "FIELDS",
+        num_args = 0..=1,
+        default_missing_value = "all"
+    )]
+    print: Option<String>,
+    /// Print using a format template (same as `find`).
+    #[arg(long = "print-format", value_name = "TEMPLATE")]
+    print_format: Option<String>,
+    /// Pipeline steps; same grammar as `find` — runs from the current node at each
+    /// unified-syntax hit, in the chosen tree walk order. Repeat; order matters.
+    #[arg(
+        long = "step",
+        value_name = "STEP",
+        action = clap::ArgAction::Append
+    )]
+    step: Vec<String>,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Find unified syntax constructs in source files.
     Find(FindArgs),
+    /// Walk the full parse tree depth-first, preorder (node then each child, left to right),
+    /// running `--step` (if any) from each node that is a unified construct, in that order.
+    #[command(name = "dfs_preorder")]
+    DfsPreorder(TraverseArgs),
+    /// Depth-first, postorder (all children, then the node; children left to right).
+    #[command(name = "dfs_postorder")]
+    DfsPostorder(TraverseArgs),
+    /// Breadth-first, left-to-right within each level and child order in parse order.
+    #[command(name = "bfs_ltr")]
+    BfsLtr(TraverseArgs),
+    /// Breadth-first, right-to-left siblings at each level (last parse-order child enqueued first).
+    #[command(name = "bfs_rtl")]
+    BfsRtl(TraverseArgs),
 }
 
 #[derive(Args)]
@@ -74,7 +122,11 @@ struct FindArgs {
     /// `has:VAR:KIND` or `h:...` (first match of KIND inside span VAR, then current = that node);
     /// `is:VAR:KIND` or `i:...` (span VAR must parse as a unified root of that kind covering the
     /// whole text — structural, not "contains");
-    /// `print:TEMPLATE` or `p:...` (one line: bindings `{name}` then `find` template fields).
+    /// `print:TEMPLATE` or `p:...` (one line: bindings `{name}` then `find` template fields);
+    /// `strip` / `strip:` / `s:` (no args: replace `current` with the leftmost loop, `if`, or
+    /// `function_definition` in the current span's text, trimming leading / trailing other syntax);
+    /// `next:NAME` (bind the next named sibling that is a unified node to `NAME`, and select it);
+    /// `expand:NAME` (bind `current`'s `body` span to `NAME` and move `current` into that body).
     /// Not valid with `function_definition` filters. Example:
     /// `--step assign:ob:body --step has:ob:loop:for --step 'print:{file} {type}'`
     #[arg(
@@ -95,6 +147,10 @@ fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Find(args) => run_find(args),
+        Command::DfsPreorder(a) => run_traverse(a, TreeTraversal::DfsPreorder),
+        Command::DfsPostorder(a) => run_traverse(a, TreeTraversal::DfsPostorder),
+        Command::BfsLtr(a) => run_traverse(a, TreeTraversal::BfsLtr),
+        Command::BfsRtl(a) => run_traverse(a, TreeTraversal::BfsRtl),
     }
 }
 
@@ -321,6 +377,186 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
     } else {
         std::process::ExitCode::SUCCESS
     }
+}
+
+fn run_traverse(args: TraverseArgs, order: TreeTraversal) -> std::process::ExitCode {
+    if args.paths.is_empty() {
+        eprintln!("error: at least one path is required (or use '-' for stdin)");
+        return std::process::ExitCode::from(2);
+    }
+
+    let print_fields = match args.print.as_deref() {
+        Some(raw) => match parse_print_fields(raw) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("error: invalid --print value: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    if print_fields.is_some() && args.print_format.is_some() {
+        eprintln!("error: --print and --print-format cannot be used together");
+        return std::process::ExitCode::from(2);
+    }
+
+    let pipeline_steps: Option<Vec<pipeline::PipelineStep>> = if args.step.is_empty() {
+        None
+    } else {
+        match pipeline::parse_steps(&args.step) {
+            Ok(s) if s.is_empty() => None,
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("error: invalid --step: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    };
+
+    let language_selector = match parse_language_selector(&args.language) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    let exclude: Vec<Regex> = match args.exclude.iter().map(|p| Regex::new(p)).collect() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: invalid --exclude regex: {e}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    let mut files = Vec::new();
+    let mut use_stdin = false;
+    for root in &args.paths {
+        if root.as_os_str() == "-" {
+            use_stdin = true;
+            continue;
+        }
+        let collected = match language_selector {
+            LanguageSelector::Explicit(language) => collect_targets(root, language, &exclude),
+            LanguageSelector::Auto => collect_targets_auto(root, &exclude),
+        };
+        match collected {
+            Ok(mut v) => files.append(&mut v),
+            Err(e) => {
+                eprintln!("error: {}: {e}", root.display());
+                return std::process::ExitCode::from(1);
+            }
+        }
+    }
+
+    files.sort();
+    files.dedup();
+
+    let mut had_error = false;
+    if use_stdin {
+        if matches!(language_selector, LanguageSelector::Auto) {
+            eprintln!("error: --language auto cannot be used with stdin; pass an explicit language");
+            return std::process::ExitCode::from(2);
+        }
+        let mut source = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut source) {
+            eprintln!("<stdin>: read error: {e}");
+            return std::process::ExitCode::from(1);
+        }
+        let language = match language_selector {
+            LanguageSelector::Explicit(l) => l,
+            LanguageSelector::Auto => unreachable!(),
+        };
+        process_traverse_source(
+            Path::new("<stdin>"),
+            &source,
+            language,
+            order,
+            print_fields.as_deref(),
+            args.print_format.as_deref(),
+            pipeline_steps.as_deref(),
+            &mut had_error,
+        );
+    }
+
+    for path in files {
+        let language = match language_selector {
+            LanguageSelector::Explicit(l) => l,
+            LanguageSelector::Auto => {
+                let Some(detected) = Language::detect_from_path(&path) else {
+                    eprintln!(
+                        "warning: {}: unsupported language for --language auto; skipping",
+                        path.display()
+                    );
+                    continue;
+                };
+                detected
+            }
+        };
+        let source = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{}: read error: {e}", path.display());
+                had_error = true;
+                continue;
+            }
+        };
+        process_traverse_source(
+            &path,
+            &source,
+            language,
+            order,
+            print_fields.as_deref(),
+            args.print_format.as_deref(),
+            pipeline_steps.as_deref(),
+            &mut had_error,
+        );
+    }
+
+    if had_error {
+        std::process::ExitCode::from(1)
+    } else {
+        std::process::ExitCode::SUCCESS
+    }
+}
+
+fn process_traverse_source(
+    path: &Path,
+    source: &str,
+    language: Language,
+    order: TreeTraversal,
+    print_fields: Option<&[PrintField]>,
+    print_format: Option<&str>,
+    pipeline: Option<&[pipeline::PipelineStep]>,
+    had_error: &mut bool,
+) {
+    let tree = match parse(language, source) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}: parse error: {e}", path.display());
+            *had_error = true;
+            return;
+        }
+    };
+    for_each_subtree_node(tree.root_node(), order, |node| {
+        if let Some(m) = map_unified_node(language, &node) {
+            if let Some(steps) = pipeline {
+                match pipeline::run_unified_pipeline(path, source, language, &m, steps) {
+                    Ok(Some(out)) if out.need_default_print => {
+                        print_unified(path, source, language, &m, print_fields, print_format);
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("{}: {e}", path.display());
+                        *had_error = true;
+                    }
+                }
+            } else {
+                print_unified(path, source, language, &m, print_fields, print_format);
+            }
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

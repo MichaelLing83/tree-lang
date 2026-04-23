@@ -1,10 +1,13 @@
-//! Ordered find pipeline: ``--step`` with `assign|a`, `has|h`, `is|i`, `print|p`. See `find --help`.
+//! Ordered find/traverse pipeline: ``--step`` with `assign|a`, `next:`, `expand:`, `has|h`, `is|i`,
+//! `print|p`, `strip`. See `find --help` and `tree-lang dfs_preorder` / `dfs_postorder` / `bfs_ltr` / `bfs_rtl` --help`.
 
 use std::collections::HashMap;
 use std::path::Path;
 
+use tree_sitter::Node;
 use tree_lang::{
-    find_unified_kinds, match_root_as_unified, Language, MappedNode, Span, UnifiedKind,
+    find_unified_kinds, map_unified_node, match_root_as_unified, parse, Language, MappedNode,
+    Span, UnifiedKind,
 };
 
 use crate::{byte_to_line_col, format_kind, kinds_from_cli, render_template, span_text};
@@ -12,9 +15,17 @@ use crate::{byte_to_line_col, format_kind, kinds_from_cli, render_template, span
 #[derive(Debug, Clone)]
 pub enum PipelineStep {
     Assign { name: String, source: String },
+    /// Next named sibling in the full parse tree that classifies as a unified node; bind span to
+    /// `var` and set `current` to that node.
+    Next { var: String },
+    /// `current` must have a `body` span: bind that span to `var` and move `current` into the
+    /// body (re-parse; if the body root is unified and spans the whole body, use that node).
+    Expand { var: String },
     Has { var: String, kind_cli: String },
     /// Root of the parse of `var`'s span must be a unified node spanning the whole slice and match KIND.
     Is { var: String, kind_cli: String },
+    /// Narrow `current` to the leftmost loop / `if` / function in its source span (drop leading and trailing non-block syntax).
+    Strip,
     Print { template: String },
 }
 
@@ -27,6 +38,9 @@ pub struct PipelineRunOutcome {
 fn split_step_prefix(s: &str) -> Option<(&'static str, &str)> {
     const PAIRS: &[(&str, &'static str)] = &[
         ("assign:", "assign"),
+        ("expand:", "expand"),
+        ("next:", "next"),
+        ("strip:", "strip"),
         ("print:", "print"),
         ("has:", "has"),
         ("is:", "is"),
@@ -34,6 +48,7 @@ fn split_step_prefix(s: &str) -> Option<(&'static str, &str)> {
         ("h:", "has"),
         ("p:", "print"),
         ("i:", "is"),
+        ("s:", "strip"),
     ];
     for (prefix, kind) in PAIRS {
         if let Some(rest) = s.strip_prefix(prefix) {
@@ -50,9 +65,13 @@ pub fn parse_steps(steps: &[String]) -> Result<Vec<PipelineStep>, String> {
         if s.is_empty() {
             continue;
         }
+        if s == "strip" {
+            out.push(PipelineStep::Strip);
+            continue;
+        }
         let Some((step_kind, rest)) = split_step_prefix(s) else {
             return Err(format!(
-                "unknown --step {s:?}; use assign:|a:, has:|h:, is:|i:, or print:|p: (see find --help)"
+                "unknown --step {s:?}; see find --help (assign, next:, expand:, has, is, print, strip, ...)"
             ));
         };
         match step_kind {
@@ -66,6 +85,30 @@ pub fn parse_steps(steps: &[String]) -> Result<Vec<PipelineStep>, String> {
                 out.push(PipelineStep::Assign {
                     name: name.to_string(),
                     source: source.to_string(),
+                });
+            }
+            "next" => {
+                let var = rest.trim();
+                if var.is_empty() {
+                    return Err(format!("next expects next:NAME, got {s:?}"));
+                }
+                if var.contains(':') {
+                    return Err(format!("next: variable name must not contain ':', got {s:?}"));
+                }
+                out.push(PipelineStep::Next {
+                    var: var.to_string(),
+                });
+            }
+            "expand" => {
+                let var = rest.trim();
+                if var.is_empty() {
+                    return Err(format!("expand expects expand:NAME, got {s:?}"));
+                }
+                if var.contains(':') {
+                    return Err(format!("expand: variable name must not contain ':', got {s:?}"));
+                }
+                out.push(PipelineStep::Expand {
+                    var: var.to_string(),
                 });
             }
             "has" | "is" => {
@@ -87,6 +130,14 @@ pub fn parse_steps(steps: &[String]) -> Result<Vec<PipelineStep>, String> {
                     });
                 }
             }
+            "strip" => {
+                if !rest.is_empty() {
+                    return Err(format!(
+                        "strip must be the word `strip`, or `strip:` / `s:` with nothing after, got {s:?}"
+                    ));
+                }
+                out.push(PipelineStep::Strip);
+            }
             "print" => {
                 out.push(PipelineStep::Print {
                     template: rest.to_string(),
@@ -96,6 +147,14 @@ pub fn parse_steps(steps: &[String]) -> Result<Vec<PipelineStep>, String> {
         }
     }
     Ok(out)
+}
+
+/// [`UnifiedKind`]s that count as "block-shaped" for `strip`: function, `if`, and all loop forms.
+fn block_shape_kinds() -> Result<Vec<UnifiedKind>, String> {
+    let mut v = kinds_from_cli("function_definition")?;
+    v.extend(kinds_from_cli("if")?);
+    v.extend(kinds_from_cli("loop")?);
+    Ok(v)
 }
 
 fn region_for_source(m: &MappedNode, from: &str) -> Result<Span, String> {
@@ -130,6 +189,21 @@ fn offset_mapped_node(m: &MappedNode, off: usize) -> MappedNode {
     }
 }
 
+/// First tree-sitter subtree in preorder whose byte range exactly matches `start..end`.
+fn ts_node_exact_range<'a>(node: Node<'a>, start: usize, end: usize) -> Option<Node<'a>> {
+    let r = node.range();
+    if r.start_byte == start && r.end_byte == end {
+        return Some(node);
+    }
+    let mut c = node.walk();
+    for child in node.children(&mut c) {
+        if let Some(n) = ts_node_exact_range(child, start, end) {
+            return Some(n);
+        }
+    }
+    None
+}
+
 /// Returns `Ok(None)` if this root match does not pass the pipeline (filter out).
 /// Returns `Err` on invalid --step usage for the current node.
 pub fn run_unified_pipeline(
@@ -152,6 +226,62 @@ pub fn run_unified_pipeline(
                     Err(e) => return Err(e),
                 };
                 bindings.insert(name.clone(), sp);
+            }
+            PipelineStep::Next { var } => {
+                let tree = parse(language, source)
+                    .map_err(|e: tree_lang::ParseError| format!("next: parse file: {e}"))?;
+                let root = tree.root_node();
+                let sp = current.span;
+                let Some(ts) = ts_node_exact_range(root, sp.start_byte, sp.end_byte) else {
+                    return Err("next: current span not found in tree-sitter tree".to_string());
+                };
+                let mut sib = ts.next_named_sibling();
+                let found = 'm: {
+                    while let Some(n) = sib {
+                        if let Some(m) = map_unified_node(language, &n) {
+                            break 'm Some(m);
+                        }
+                        sib = n.next_named_sibling();
+                    }
+                    None
+                };
+                let Some(m) = found else {
+                    return Ok(None);
+                };
+                bindings.insert(var.clone(), m.span);
+                current = m;
+            }
+            PipelineStep::Expand { var } => {
+                let b = current
+                    .body
+                    .ok_or_else(|| "expand: current unified node has no `body` field".to_string())?;
+                if b.start_byte >= b.end_byte {
+                    return Ok(None);
+                }
+                bindings.insert(var.clone(), b);
+                let slice = source
+                    .get(b.start_byte..b.end_byte)
+                    .ok_or_else(|| "expand: body out of range".to_string())?;
+                let body_tree = parse(language, slice)
+                    .map_err(|e: tree_lang::ParseError| format!("expand: parse body: {e}"))?;
+                let br = body_tree.root_node();
+                if let Some(m) = map_unified_node(language, &br) {
+                    if m.span.start_byte == 0 && m.span.end_byte == slice.len() {
+                        current = offset_mapped_node(&m, b.start_byte);
+                    } else {
+                        current = MappedNode {
+                            kind: current.kind,
+                            span: b,
+                            body: None,
+                        };
+                    }
+                } else {
+                    current = MappedNode {
+                        kind: current.kind,
+                        span: b,
+                        body: None,
+                    };
+                }
             }
             PipelineStep::Has { var, kind_cli } => {
                 let sp = *bindings
@@ -197,6 +327,26 @@ pub fn run_unified_pipeline(
                 }
                 let target_kinds = kinds_from_cli(kind_cli.as_str())?;
                 let Some(m) = match_root_as_unified(language, slice, &target_kinds) else {
+                    return Ok(None);
+                };
+                current = offset_mapped_node(&m, sp.start_byte);
+            }
+            PipelineStep::Strip => {
+                let sp = current.span;
+                let slice = source
+                    .get(sp.start_byte..sp.end_byte)
+                    .ok_or_else(|| "strip: current span out of range".to_string())?;
+                if slice.is_empty() {
+                    return Ok(None);
+                }
+                let kinds = block_shape_kinds()?;
+                let v = find_unified_kinds(language, slice, &kinds).map_err(|e: tree_lang::ParseError| {
+                    format!("strip: parse in span: {e}")
+                })?;
+                let m = v
+                    .into_iter()
+                    .min_by_key(|m| (m.span.start_byte, m.span.end_byte));
+                let Some(m) = m else {
                     return Ok(None);
                 };
                 current = offset_mapped_node(&m, sp.start_byte);

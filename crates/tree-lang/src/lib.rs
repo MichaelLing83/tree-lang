@@ -2,6 +2,8 @@
 //!
 //! MVP: C, C++, Java, Rust, Python — function definitions, loops, `if`/`else`.
 
+use std::collections::VecDeque;
+
 mod classify;
 mod language;
 
@@ -55,6 +57,69 @@ pub struct FunctionDefinitionNode {
 pub struct FunctionParameter {
     pub name: String,
     pub ty: Option<String>,
+}
+
+/// Order for visiting every node in a tree-sitter subtree (including anonymous nodes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TreeTraversal {
+    /// Node first, then each child left-to-right (default depth-first walk).
+    DfsPreorder,
+    /// All children (left-to-right) first, then the node.
+    DfsPostorder,
+    /// Level order; within each level, left-to-right (children enqueued in parse order).
+    BfsLtr,
+    /// Level order; within each level, right-to-left (siblings: last child in parse order first).
+    BfsRtl,
+}
+
+/// Visit `root` and every descendant in the given order; all children are visited in
+/// tree-sitter `children` order, same as [`walk`].
+pub fn for_each_subtree_node(
+    root: Node<'_>,
+    order: TreeTraversal,
+    mut f: impl FnMut(Node<'_>),
+) {
+    match order {
+        TreeTraversal::DfsPreorder => dfs_preorder(root, &mut f),
+        TreeTraversal::DfsPostorder => dfs_postorder(root, &mut f),
+        TreeTraversal::BfsLtr => bfs_subtree(root, &mut f, true),
+        TreeTraversal::BfsRtl => bfs_subtree(root, &mut f, false),
+    }
+}
+
+fn dfs_preorder(node: Node<'_>, f: &mut impl FnMut(Node<'_>)) {
+    f(node);
+    let mut c = node.walk();
+    for child in node.children(&mut c) {
+        dfs_preorder(child, f);
+    }
+}
+
+fn dfs_postorder(node: Node<'_>, f: &mut impl FnMut(Node<'_>)) {
+    let mut c = node.walk();
+    for child in node.children(&mut c) {
+        dfs_postorder(child, f);
+    }
+    f(node);
+}
+
+fn bfs_subtree(root: Node<'_>, f: &mut impl FnMut(Node<'_>), children_ltr: bool) {
+    let mut q: VecDeque<Node<'_>> = VecDeque::new();
+    q.push_back(root);
+    while let Some(n) = q.pop_front() {
+        f(n);
+        let mut c = n.walk();
+        let ch: Vec<Node<'_>> = n.children(&mut c).collect();
+        if children_ltr {
+            for child in ch {
+                q.push_back(child);
+            }
+        } else {
+            for child in ch.into_iter().rev() {
+                q.push_back(child);
+            }
+        }
+    }
 }
 
 /// Depth-first walk of `tree`, returning every node that maps to a [`UnifiedKind`].

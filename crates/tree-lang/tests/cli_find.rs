@@ -204,6 +204,108 @@ fn find_supports_pipeline_is_step() {
 }
 
 #[test]
+fn find_supports_pipeline_strip_step() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-l",
+        "rust",
+        "-k",
+        "function_definition",
+        "--step",
+        "assign:b:body",
+        "--step",
+        "strip",
+        "--step",
+        "print:STRIP-OK",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"fn f() { let _ = 1; for _ in 0..1 {} }\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("STRIP-OK"), "stdout: {stdout}");
+}
+
+#[test]
+fn find_supports_pipeline_next_step() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-l",
+        "rust",
+        "-k",
+        "function_definition",
+        "--step",
+        "next:n",
+        "--step",
+        "print:NEXT-OK",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"fn a() {}\nfn b() {}\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().filter(|l| l.contains("NEXT-OK")).count(),
+        1,
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn find_supports_pipeline_expand_step() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-l",
+        "rust",
+        "-k",
+        "loop",
+        "--step",
+        "expand:inner",
+        "--step",
+        "print:EXPAND-OK",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"for _ in 0..1 { let _x = 0; }\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("EXPAND-OK"), "stdout: {stdout}");
+}
+
+#[test]
 fn find_supports_print_and_print_format() {
     let rust_file = data_path("rust/rustc_parse_expr.rs");
 
