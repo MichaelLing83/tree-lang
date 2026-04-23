@@ -101,7 +101,7 @@ pub fn parse_steps(steps: &[String]) -> Result<Vec<PipelineStep>, String> {
 fn region_for_source(m: &MappedNode, from: &str) -> Result<Span, String> {
     let s = from.trim();
     match s {
-        "node" | "node_span" => Ok(m.span),
+        "node" | "node_span" | "content" => Ok(m.span),
         "body" => m
             .body
             .ok_or_else(|| "this node has no body field".to_string()),
@@ -113,7 +113,7 @@ fn region_for_source(m: &MappedNode, from: &str) -> Result<Span, String> {
                 .ok_or_else(|| "if node has no consequence/body span".to_string())
         }
         _ => Err(format!(
-            "unknown assign source {from:?}; use node, node_span, body, or consequence"
+            "unknown assign source {from:?}; use node, node_span, content, body, or consequence"
         )),
     }
 }
@@ -168,7 +168,16 @@ pub fn run_unified_pipeline(
                 }
                 let target_kinds = kinds_from_cli(kind_cli.as_str())?;
                 let found = find_unified_kinds(language, slice, &target_kinds);
-                let Some(m) = found.ok().and_then(|v| v.into_iter().next()) else {
+                // Re-parsing a *full* loop node (assign …:node) makes that loop the tree root, so
+                // the first DFS match would be the same loop again. Skip matches that cover the
+                // entire sub-slice; keep looking for a strictly inner loop. (Assign …:body instead
+                // of node if you only need “inside the braces” without this ambiguity.)
+                let m = found.ok().and_then(|v| {
+                    let slen = slice.len();
+                    v.into_iter()
+                        .find(|m| m.span.start_byte != 0 || m.span.end_byte != slen)
+                });
+                let Some(m) = m else {
                     return Ok(None);
                 };
                 current = offset_mapped_node(&m, sp.start_byte);

@@ -70,7 +70,7 @@ struct FindArgs {
     #[arg(long = "print-format", value_name = "TEMPLATE")]
     print_format: Option<String>,
     /// Ordered find pipeline. Repeat; order matters. Each value uses one of:
-    /// `assign:NAME:SOURCE` or `a:...` (from current: node, body, or consequence for if);
+    /// `assign:NAME:SOURCE` or `a:...` (from current: node, content, body, or consequence for if);
     /// `has:VAR:KIND` or `h:...` (first match of KIND inside span VAR, then current = that node);
     /// `is:VAR:KIND` or `i:...` (span VAR must parse as a unified root of that kind covering the
     /// whole text — structural, not "contains");
