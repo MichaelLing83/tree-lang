@@ -119,7 +119,8 @@ struct FindArgs {
     /// Target language: c, cpp, java, python, rust, auto (default: auto).
     #[arg(short = 'l', long = "language", value_name = "LANG", default_value = "auto")]
     language: String,
-    /// Unified syntax kind: function_definition, if, loop, or loop:for / loop:while / …
+    /// Unified syntax kind: function_definition, if, loop, loop:<subtype> (e.g. loop:for), or
+    /// loop(<subtype>) matching default output (e.g. loop(for) → same as loop:for).
     #[arg(short = 'k', long = "kind", value_name = "KIND")]
     kind: String,
     /// Match the name of found structures (when the selected kind has names, e.g. functions).
@@ -898,21 +899,33 @@ fn is_excluded(path: &Path, exclude: &[Regex]) -> bool {
     exclude.iter().any(|re| re.is_match(s.as_ref()))
 }
 
+fn parse_loop_subtype(sub: &str) -> Result<LoopKind, String> {
+    let sub = sub.trim().replace('-', "_");
+    match sub.as_str() {
+        "for" => Ok(LoopKind::For),
+        "foreach" | "for_each" => Ok(LoopKind::ForEach),
+        "while" => Ok(LoopKind::While),
+        "dowhile" | "do_while" => Ok(LoopKind::DoWhile),
+        "infinite" | "forever" => Ok(LoopKind::Infinite),
+        other => Err(format!(
+            "unknown loop subtype {other:?}: use for, foreach, while, dowhile, or infinite (see README)"
+        )),
+    }
+}
+
 pub(crate) fn kinds_from_cli(s: &str) -> Result<Vec<UnifiedKind>, String> {
     let normalized = s.trim().to_ascii_lowercase().replace('-', "_");
     if let Some(sub) = normalized.strip_prefix("loop:") {
-        let lk = match sub {
-            "for" => LoopKind::For,
-            "foreach" | "for_each" => LoopKind::ForEach,
-            "while" => LoopKind::While,
-            "dowhile" | "do_while" => LoopKind::DoWhile,
-            "infinite" | "forever" => LoopKind::Infinite,
-            other => {
-                return Err(format!(
-                    "unknown loop subtype {other:?}: use for, foreach, while, dowhile, or infinite"
-                ));
-            }
-        };
+        let lk = parse_loop_subtype(sub)?;
+        return Ok(vec![UnifiedKind::Loop(lk)]);
+    }
+    // Same subtypes as `loop:…`, but matches default `{type}` output (`Loop(For)`, …).
+    if let Some(inner) = normalized
+        .strip_prefix("loop(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let inner = inner.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let lk = parse_loop_subtype(&inner)?;
         return Ok(vec![UnifiedKind::Loop(lk)]);
     }
     match normalized.as_str() {
@@ -928,7 +941,7 @@ pub(crate) fn kinds_from_cli(s: &str) -> Result<Vec<UnifiedKind>, String> {
             UnifiedKind::Loop(LoopKind::Infinite),
         ]),
         _ => Err(format!(
-            "unknown kind {s:?}: expected function_definition, if, loop, or loop:<subtype>"
+            "unknown kind {s:?}: expected function_definition, if, loop, loop:<subtype>, or loop(<subtype>) (see README)"
         )),
     }
 }

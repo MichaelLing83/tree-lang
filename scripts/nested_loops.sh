@@ -32,6 +32,9 @@
 #
 # Output: one line per matched *outer* loop (default), or a multi-line block per
 #         match with -m.
+#
+# If you see only the banner and no data lines, there were no matches. tree-lang
+# diagnostics go to stderr (avoid silencing stderr when debugging).
 
 set -e
 set -o pipefail 2>/dev/null || true
@@ -101,7 +104,7 @@ run_treelang() {
     --step 'strip' \
     --step 'assign:s:node' \
     --step 'is:s:loop' \
-    "$@" 2>/dev/null
+    "$@"
 }
 
 if [[ "$MULTILINE" -eq 0 ]]; then

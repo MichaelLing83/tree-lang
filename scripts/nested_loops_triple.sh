@@ -33,6 +33,11 @@
 #   TREE_LANG=./target/debug/tree-lang scripts/nested_loops_triple.sh ./crates rust
 #
 # Output: one line per matched *outermost* loop (L1) that satisfies the chain.
+#
+# Troubleshooting: if you only see the demo banner and no further lines, there were
+# zero matches (this pattern is strict). tree-lang errors go to stderr — do not
+# silence stderr when debugging. A tiny fixture that should match:
+#   scripts/nested_loops_triple.sh crates/tree-lang/tests/data/rust/triple_nested_for.rs rust
 
 set -e
 set -o pipefail 2>/dev/null || true
@@ -96,7 +101,7 @@ run_treelang() {
     --step 'strip' \
     --step 'assign:i:node' \
     --step 'is:i:loop' \
-    "$@" 2>/dev/null
+    "$@"
 }
 
 if [[ "$MULTILINE" -eq 0 ]]; then

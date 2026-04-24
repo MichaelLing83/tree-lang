@@ -138,6 +138,28 @@ fn find_supports_return_type_filter() {
 }
 
 #[test]
+fn find_accepts_loop_kind_in_output_style_loop_for() {
+    let c_file = data_path("c/libgit2_repository.c");
+    let out = bin_cmd()
+        .args([
+            "find",
+            c_file.to_str().expect("utf8 path"),
+            "-l",
+            "c",
+            "-k",
+            "loop(for)",
+        ])
+        .output()
+        .expect("run tree-lang find -k loop(for)");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Loop(For)"),
+        "expected Loop(For) in output, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn find_supports_pipeline_step() {
     let c_file = data_path("c/libgit2_repository.c");
     let out = bin_cmd()

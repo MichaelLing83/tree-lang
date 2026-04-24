@@ -11,6 +11,49 @@ It provides a unified syntax model across multiple languages, so the same analys
 - Python
 - Java
 
+## Unified kinds (names you pass vs names you see)
+
+The same logical construct uses **different spellings** depending on whether you are typing a CLI flag or reading default output / `{type}` in `--print-format`.
+
+| Layer | Role | Examples |
+| ----- | ---- | -------- |
+| **CLI input** | `-k` / `--kind`, and the `KIND` part of `has:…:KIND` / `is:…:KIND` in `--step` | `function_definition`, `if`, `loop`, `loop:for`, `loop:while`, `loop:foreach`, `loop:dowhile`, `loop:infinite` |
+| **CLI output** | Default `find` / traverse lines and `{type}` in templates | `FunctionDefinition`, `If`, `Loop(For)`, `Loop(While)`, … (Rust-style labels) |
+| **Rust API** | `tree_lang_core::UnifiedKind`, `LoopKind` | `UnifiedKind::Loop(LoopKind::For)`, etc. |
+
+Input is **ASCII**, case-insensitive, with `-` and `_` treated the same (`loop-for` ≡ `loop_for`).
+
+**Loop subtypes (input):** use either `loop:<subtype>` or the same subtype inside parentheses to mirror output, for example:
+
+- `loop:for` or **`loop(for)`** → `Loop(For)`
+- `loop:foreach` or **`loop(foreach)`** / `loop(for_each)` → `Loop(ForEach)`
+- `loop:while` or **`loop(while)`** → `Loop(While)`
+- `loop:dowhile` or **`loop(dowhile)`** / `loop(do_while)` → `Loop(DoWhile)`
+- `loop:infinite` or **`loop(infinite)`** / `loop(forever)` → `Loop(Infinite)` (Rust `loop { }`)
+
+`-k loop` (no subtype) matches **any** of the above loop subtypes in one search.
+
+### What counts as a `loop` (by language)
+
+Classification is implemented in `crates/tree-lang/src/classify.rs` (tree-sitter **node type** string → unified kind). Only these nodes become `UnifiedKind::Loop(…)` today:
+
+| Language | Tree-sitter node types treated as loops | Unified subtype |
+| -------- | ---------------------------------------- | ---------------- |
+| **Python** | `for_statement`, `while_statement` | `For`, `While` |
+| **Java** | `for_statement`, `enhanced_for_statement`, `while_statement`, `do_statement` | `For`, `ForEach`, `While`, `DoWhile` |
+| **Rust** | `for_expression`, `while_expression`, `loop_expression` | `For`, `While`, `Infinite` |
+| **C** | `for_statement`, `while_statement`, `do_statement` | `For`, `While`, `DoWhile` |
+| **C++** | `for_statement`, `for_range_loop`, `while_statement`, `do_statement` | `For`, `ForEach` (range-for), `While`, `DoWhile` |
+
+Not modeled as `loop`: `switch`, comprehensions / generator expressions as expressions-only constructs, macro-expanded bodies (tree-sitter sees the macro call, not the expanded loop), etc. If a grammar adds a new loop-shaped node, add it in `classify.rs`.
+
+### Other unified kinds
+
+| Unified kind | Typical tree-sitter roots (per language) |
+| ------------ | ------------------------------------------ |
+| `function_definition` | e.g. Rust `function_item`, Python `function_definition`, Java `method_declaration`, C/C++ `function_definition` |
+| `if` | `if_statement` / `if_expression` (Rust) |
+
 ## CLI
 
 The project provides a command-line tool also named `tree-lang`.
@@ -38,12 +81,12 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
   - accepted values: `c`, `cpp` (also `c++`, `cxx`), `java`, `python` (also `py`), `rust` (also `rs`)
 
 - `-k, --kind <KIND>`
-  - target unified syntax kind
+  - target unified syntax kind (see **Unified kinds** above for naming and language mapping)
   - accepted values:
     - `function_definition` (also `fn`, `func`)
     - `if`
     - `loop` (all loop subtypes)
-    - `loop:for`
+    - `loop:for` or `loop(for)` (and similarly for other subtypes; see README table)
     - `loop:foreach`
     - `loop:while`
     - `loop:dowhile`
@@ -83,9 +126,9 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
 - `--print [FIELDS]`
   - customize output fields for each match
   - `--print` without value is equivalent to `--print all`
-  - supported fields: `file`, `type`, `start`, `end`, `content`
-  - `all` expands to `file,type,start,end,content`
-  - content is escaped (`\n`, `\t`, etc.) to keep one match per output line
+  - supported fields: `file`, `type`, `start`, `end`, `content`, `body`, `language`, `start_byte`, `end_byte`, `body_start_byte`, `body_end_byte`
+  - `all` expands to all of the above in a fixed order
+  - `content` / `body` are escaped (`\n`, `\t`, etc.) so each match stays on one logical output row when tab-separated
 
 - `--print-format <TEMPLATE>`
   - custom output template for each match
@@ -98,6 +141,27 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
     - `{range}` (like `12:0-34:1`)
     - `{name}` (empty if not available)
     - `{content}` (escaped node text)
+    - `{body}`, `{language}`, `{start_byte}`, `{end_byte}`, `{body_start_byte}`, `{body_end_byte}`
+
+- `--step <STEP>` (repeatable; `find` only when not using function-definition name/param filters)
+  - ordered pipeline over each match; same `--step` grammar on traverse subcommands (below)
+  - full syntax: `tree-lang find --help` (long help lists every step kind)
+
+### Traverse commands (`dfs_*`, `bfs_*`)
+
+Walk the **full** parse tree (every tree-sitter node in the chosen order). Whenever a node classifies as a unified kind (`function_definition`, `if`, or `loop`), run the same `--print` / `--print-format` / `--step` pipeline from that node as `current`.
+
+Subcommands:
+
+- `dfs_preorder` — depth-first, preorder (same visit order family as `find`’s walk)
+- `dfs_postorder` — depth-first, postorder
+- `bfs_ltr` / `bfs_rtl` — breadth-first, left-to-right or right-to-left among siblings per level
+
+They take paths, `-l` / `--language`, `-e` / `--exclude`, and the same printing / `--step` options as documented for `find` (without `-k` / function filters). Example:
+
+```bash
+tree-lang dfs_preorder ./src -l rust --step 'assign:n:node' --step 'is:n:loop' --step 'p:{file} {type}'
+```
 
 ### Output Format
 
