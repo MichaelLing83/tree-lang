@@ -1,7 +1,7 @@
 # tree-lang
 
 `tree-lang` is a Rust-based source code analysis toolkit built on top of tree-sitter.
-It provides a unified syntax model across multiple languages, so the same analysis flow can find constructs like `FunctionDefinition`, `Loop`, and `If` in different language grammars.
+It provides a unified syntax model across multiple languages, so the same analysis flow can find constructs like `FunctionDefinition`, `Loop`, and `Branch` (if / switch / match) in different language grammars.
 
 ## Supported Languages (Current MVP)
 
@@ -17,9 +17,9 @@ The same logical construct uses **different spellings** depending on whether you
 
 | Layer | Role | Examples |
 | ----- | ---- | -------- |
-| **CLI input** | `-k` / `--kind`, and the `KIND` part of `has:…:KIND` / `is:…:KIND` in `--step` | `function_definition`, `if`, `loop`, `loop:for`, `loop:while`, `loop:foreach`, `loop:dowhile`, `loop:infinite` |
-| **CLI output** | Default `find` / traverse lines and `{type}` in templates | `FunctionDefinition`, `If`, `Loop(For)`, `Loop(While)`, … (Rust-style labels) |
-| **Rust API** | `tree_lang_core::UnifiedKind`, `LoopKind` | `UnifiedKind::Loop(LoopKind::For)`, etc. |
+| **CLI input** | `-k` / `--kind`, and the `KIND` part of `has:…:KIND` / `is:…:KIND` in `--step` | `function_definition`, `branch`, `branch:if`, `branch:switch`, `branch:match`, `loop`, `loop:for`, … |
+| **CLI output** | Default `find` / traverse lines and `{type}` in templates | `FunctionDefinition`, `Branch(If)`, `Branch(Switch)`, `Loop(For)`, … |
+| **Rust API** | `tree_lang_core::UnifiedKind`, `LoopKind`, `BranchKind` | e.g. `UnifiedKind::Branch(BranchKind::If)` |
 
 Input is **ASCII**, case-insensitive, with `-` and `_` treated the same (`loop-for` ≡ `loop_for`).
 
@@ -33,6 +33,14 @@ Input is **ASCII**, case-insensitive, with `-` and `_` treated the same (`loop-f
 
 `-k loop` (no subtype) matches **any** of the above loop subtypes in one search.
 
+**Branch subtypes (input):** same pattern as loops — `branch:<subtype>` or `branch(<subtype>)` mirroring `{type}` output:
+
+- `branch:if` or **`branch(if)`** → `Branch(If)`
+- `branch:switch` or **`branch(switch)`** → `Branch(Switch)` (C/C++/Java `switch`)
+- `branch:match` or **`branch(match)`** → `Branch(Match)` (Rust `match`, Python `match`)
+
+`-k branch` matches **any** of the three branch subtypes in one search.
+
 ### What counts as a `loop` (by language)
 
 Classification is implemented in `crates/tree-lang/src/classify.rs` (tree-sitter **node type** string → unified kind). Only these nodes become `UnifiedKind::Loop(…)` today:
@@ -45,14 +53,22 @@ Classification is implemented in `crates/tree-lang/src/classify.rs` (tree-sitter
 | **C** | `for_statement`, `while_statement`, `do_statement` | `For`, `While`, `DoWhile` |
 | **C++** | `for_statement`, `for_range_loop`, `while_statement`, `do_statement` | `For`, `ForEach` (range-for), `While`, `DoWhile` |
 
-Not modeled as `loop`: `switch`, comprehensions / generator expressions as expressions-only constructs, macro-expanded bodies (tree-sitter sees the macro call, not the expanded loop), etc. If a grammar adds a new loop-shaped node, add it in `classify.rs`.
+Not modeled as `loop`: comprehensions / generator expressions as expressions-only constructs, macro-expanded bodies (tree-sitter sees the macro call, not the expanded loop), etc. If a grammar adds a new loop-shaped node, add it in `classify.rs`.
 
-### Other unified kinds
+### What counts as a `branch` (by language)
+
+| Language | Tree-sitter node types | Unified subtype |
+| -------- | ---------------------- | ---------------- |
+| **Python** | `if_statement` → If; `match_statement` → Match | `If`, `Match` |
+| **Java** | `if_statement` → If; `switch_statement` → Switch | `If`, `Switch` |
+| **Rust** | `if_expression` → If; `match_expression` → Match | `If`, `Match` |
+| **C / C++** | `if_statement` → If; `switch_statement` → Switch | `If`, `Switch` |
+
+### `function_definition`
 
 | Unified kind | Typical tree-sitter roots (per language) |
 | ------------ | ------------------------------------------ |
-| `function_definition` | e.g. Rust `function_item`, Python `function_definition`, Java `method_declaration`, C/C++ `function_definition` |
-| `if` | `if_statement` / `if_expression` (Rust) |
+| `function_definition` | Rust `function_item`, Python `function_definition`, Java `method_declaration`, C/C++ `function_definition` |
 
 ## CLI
 
@@ -84,7 +100,8 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
   - target unified syntax kind (see **Unified kinds** above for naming and language mapping)
   - accepted values:
     - `function_definition` (also `fn`, `func`)
-    - `if`
+    - `branch` (all branch subtypes: if, switch, match)
+    - `branch:if`, `branch:switch`, `branch:match` (also `branch(if)`, etc.)
     - `loop` (all loop subtypes)
     - `loop:for` or `loop(for)` (and similarly for other subtypes; see README table)
     - `loop:foreach`
@@ -149,7 +166,7 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
 
 ### Traverse commands (`dfs_*`, `bfs_*`)
 
-Walk the **full** parse tree (every tree-sitter node in the chosen order). Whenever a node classifies as a unified kind (`function_definition`, `if`, or `loop`), run the same `--print` / `--print-format` / `--step` pipeline from that node as `current`.
+Walk the **full** parse tree (every tree-sitter node in the chosen order). Whenever a node classifies as a unified kind (`function_definition`, any `branch`, or any `loop`), run the same `--print` / `--print-format` / `--step` pipeline from that node as `current`.
 
 Subcommands:
 
@@ -266,7 +283,7 @@ matches = tree_lang.find_in_source(
 path_matches = tree_lang.find_in_paths(
     paths=["src"],
     language="rust",
-    kind="if",
+    kind="branch:if",
     exclude=[r"/target/"],
 )
 ```

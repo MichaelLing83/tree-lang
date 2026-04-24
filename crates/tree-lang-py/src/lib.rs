@@ -5,7 +5,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use regex::Regex;
-use ::tree_lang::{find_unified_kinds, Language, LoopKind, UnifiedKind};
+use ::tree_lang::{find_unified_kinds, format_kind as tl_format_kind, kinds_from_cli, Language, UnifiedKind};
 use walkdir::WalkDir;
 
 #[pyfunction]
@@ -17,7 +17,10 @@ fn supported_languages() -> Vec<&'static str> {
 fn supported_kinds() -> Vec<&'static str> {
     vec![
         "function_definition",
-        "if",
+        "branch",
+        "branch:if",
+        "branch:switch",
+        "branch:match",
         "loop",
         "loop:for",
         "loop:foreach",
@@ -43,7 +46,7 @@ fn find_in_source(
         let d = PyDict::new_bound(py);
         let (sl, sc) = byte_to_line_col(source, m.span.start_byte);
         let (el, ec) = byte_to_line_col(source, m.span.end_byte);
-        d.set_item("kind", format_kind(m.kind))?;
+        d.set_item("kind", tl_format_kind(m.kind))?;
         d.set_item("language", language.as_cli_name())?;
         d.set_item("start_byte", m.span.start_byte)?;
         d.set_item("end_byte", m.span.end_byte)?;
@@ -90,7 +93,7 @@ fn find_in_paths(
             let (sl, sc) = byte_to_line_col(&source, m.span.start_byte);
             let (el, ec) = byte_to_line_col(&source, m.span.end_byte);
             d.set_item("file", path.to_string_lossy().to_string())?;
-            d.set_item("kind", format_kind(m.kind))?;
+            d.set_item("kind", tl_format_kind(m.kind))?;
             d.set_item("language", language.as_cli_name())?;
             d.set_item("start_byte", m.span.start_byte)?;
             d.set_item("end_byte", m.span.end_byte)?;
@@ -128,38 +131,7 @@ fn parse_language(raw: &str) -> PyResult<Language> {
 }
 
 fn parse_kind(raw: &str) -> PyResult<Vec<UnifiedKind>> {
-    let normalized = raw.trim().to_ascii_lowercase().replace('-', "_");
-    if let Some(sub) = normalized.strip_prefix("loop:") {
-        let lk = match sub {
-            "for" => LoopKind::For,
-            "foreach" | "for_each" => LoopKind::ForEach,
-            "while" => LoopKind::While,
-            "dowhile" | "do_while" => LoopKind::DoWhile,
-            "infinite" | "forever" => LoopKind::Infinite,
-            _ => {
-                return Err(PyValueError::new_err(format!(
-                    "unknown loop subtype {sub:?}; expected for, foreach, while, dowhile, infinite"
-                )))
-            }
-        };
-        return Ok(vec![UnifiedKind::Loop(lk)]);
-    }
-    match normalized.as_str() {
-        "functiondefinition" | "function_definition" | "fn" | "func" => {
-            Ok(vec![UnifiedKind::FunctionDefinition])
-        }
-        "if" => Ok(vec![UnifiedKind::If]),
-        "loop" => Ok(vec![
-            UnifiedKind::Loop(LoopKind::For),
-            UnifiedKind::Loop(LoopKind::ForEach),
-            UnifiedKind::Loop(LoopKind::While),
-            UnifiedKind::Loop(LoopKind::DoWhile),
-            UnifiedKind::Loop(LoopKind::Infinite),
-        ]),
-        _ => Err(PyValueError::new_err(format!(
-            "unknown kind {raw:?}; expected function_definition, if, loop, or loop:<subtype>"
-        ))),
-    }
+    kinds_from_cli(raw).map_err(PyValueError::new_err)
 }
 
 fn compile_excludes(patterns: Vec<String>) -> PyResult<Vec<Regex>> {
@@ -232,14 +204,6 @@ fn is_excluded(path: &Path, exclude: &[Regex]) -> bool {
     exclude.iter().any(|re| re.is_match(s.as_ref()))
 }
 
-fn format_kind(kind: UnifiedKind) -> String {
-    match kind {
-        UnifiedKind::FunctionDefinition => "FunctionDefinition".to_string(),
-        UnifiedKind::If => "If".to_string(),
-        UnifiedKind::Loop(k) => format!("Loop({k:?})"),
-    }
-}
-
 fn byte_to_line_col(source: &str, byte: usize) -> (usize, usize) {
     let byte = byte.min(source.len());
     let prefix = &source[..byte];
@@ -282,9 +246,14 @@ mod tests {
         ));
         assert!(matches!(
             parse_kind("loop:for").unwrap().as_slice(),
-            [UnifiedKind::Loop(LoopKind::For)]
+            [UnifiedKind::Loop(::tree_lang::LoopKind::For)]
+        ));
+        assert!(matches!(
+            parse_kind("branch:if").unwrap().as_slice(),
+            [UnifiedKind::Branch(::tree_lang::BranchKind::If)]
         ));
         assert_eq!(parse_kind("loop").unwrap().len(), 5);
+        assert_eq!(parse_kind("branch").unwrap().len(), 3);
         assert!(parse_kind("loop:typo").is_err());
         assert!(parse_kind("unknown").is_err());
     }
@@ -313,11 +282,14 @@ mod tests {
     #[test]
     fn format_kind_variants() {
         assert_eq!(
-            format_kind(UnifiedKind::FunctionDefinition),
+            tl_format_kind(UnifiedKind::FunctionDefinition),
             "FunctionDefinition"
         );
-        assert_eq!(format_kind(UnifiedKind::If), "If");
-        assert!(format_kind(UnifiedKind::Loop(LoopKind::While)).starts_with("Loop"));
+        assert_eq!(
+            tl_format_kind(UnifiedKind::Branch(::tree_lang::BranchKind::If)),
+            "Branch(If)"
+        );
+        assert!(tl_format_kind(UnifiedKind::Loop(::tree_lang::LoopKind::While)).starts_with("Loop"));
     }
 
     #[test]

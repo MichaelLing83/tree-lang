@@ -6,11 +6,11 @@ use std::path::Path;
 
 use tree_sitter::Node;
 use tree_lang::{
-    find_unified_kinds, map_unified_node, match_root_as_unified, parse, Language, MappedNode,
-    Span, UnifiedKind,
+    find_unified_kinds, format_kind, kinds_from_cli, map_unified_node, match_root_as_unified, parse,
+    BranchKind, Language, MappedNode, Span, UnifiedKind,
 };
 
-use crate::{byte_to_line_col, format_kind, kinds_from_cli, render_template, span_text};
+use crate::{byte_to_line_col, render_template, span_text};
 
 #[derive(Debug, Clone)]
 pub enum PipelineStep {
@@ -152,7 +152,7 @@ pub fn parse_steps(steps: &[String]) -> Result<Vec<PipelineStep>, String> {
 /// [`UnifiedKind`]s that count as "block-shaped" for `strip`: function, `if`, and all loop forms.
 fn block_shape_kinds() -> Result<Vec<UnifiedKind>, String> {
     let mut v = kinds_from_cli("function_definition")?;
-    v.extend(kinds_from_cli("if")?);
+    v.extend(kinds_from_cli("branch")?);
     v.extend(kinds_from_cli("loop")?);
     Ok(v)
 }
@@ -165,8 +165,11 @@ fn region_for_source(m: &MappedNode, from: &str) -> Result<Span, String> {
             .body
             .ok_or_else(|| "this node has no body field".to_string()),
         "consequence" => {
-            if m.kind != UnifiedKind::If {
-                return Err("--assign :consequence is only valid when the current node is an if".to_string());
+            if m.kind != UnifiedKind::Branch(BranchKind::If) {
+                return Err(
+                    "--assign :consequence is only valid when the current node is branch:if"
+                        .to_string(),
+                );
             }
             m.body
                 .ok_or_else(|| "if node has no consequence/body span".to_string())

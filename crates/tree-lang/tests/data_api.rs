@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use tree_lang::{
-    find_function_definitions, find_unified_kind, find_unified_kinds, Language, UnifiedKind,
+    find_function_definitions, find_unified_kind, find_unified_kinds, BranchKind, Language,
+    UnifiedKind,
 };
 
 fn read_data(path_under_data: &str) -> String {
@@ -126,13 +127,17 @@ fn multi_kind_search_returns_requested_kinds_only() {
     let nodes = find_unified_kinds(
         Language::Python,
         &source,
-        &[UnifiedKind::FunctionDefinition, UnifiedKind::If],
+        &[
+            UnifiedKind::FunctionDefinition,
+            UnifiedKind::Branch(BranchKind::If),
+        ],
     )
     .expect("parse");
 
     assert!(!nodes.is_empty());
     assert!(nodes.iter().all(|n| {
-        n.kind == UnifiedKind::FunctionDefinition || n.kind == UnifiedKind::If
+        n.kind == UnifiedKind::FunctionDefinition
+            || n.kind == UnifiedKind::Branch(BranchKind::If)
     }));
 }
 

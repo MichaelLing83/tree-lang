@@ -1,4 +1,4 @@
-use tree_lang::{extract_unified, parse, Language, LoopKind, UnifiedKind};
+use tree_lang::{extract_unified, parse, BranchKind, Language, LoopKind, UnifiedKind};
 
 fn kinds_sample(lang: Language, source: &str) -> Vec<UnifiedKind> {
     let tree = parse(lang, source).expect("parse");
@@ -28,7 +28,7 @@ def f():
             UnifiedKind::FunctionDefinition,
             UnifiedKind::Loop(LoopKind::For),
             UnifiedKind::Loop(LoopKind::While),
-            UnifiedKind::If,
+            UnifiedKind::Branch(BranchKind::If),
         ]
     );
 }
@@ -51,7 +51,7 @@ fn main() {
             UnifiedKind::Loop(LoopKind::For),
             UnifiedKind::Loop(LoopKind::While),
             UnifiedKind::Loop(LoopKind::Infinite),
-            UnifiedKind::If,
+            UnifiedKind::Branch(BranchKind::If),
         ]
     );
 }
@@ -78,7 +78,7 @@ class T {
             UnifiedKind::Loop(LoopKind::ForEach),
             UnifiedKind::Loop(LoopKind::While),
             UnifiedKind::Loop(LoopKind::DoWhile),
-            UnifiedKind::If,
+            UnifiedKind::Branch(BranchKind::If),
         ]
     );
 }
@@ -101,8 +101,39 @@ void f() {
             UnifiedKind::Loop(LoopKind::For),
             UnifiedKind::Loop(LoopKind::While),
             UnifiedKind::Loop(LoopKind::DoWhile),
-            UnifiedKind::If,
+            UnifiedKind::Branch(BranchKind::If),
         ]
+    );
+}
+
+#[test]
+fn rust_match_classified_as_branch_match() {
+    let src = r#"
+fn demo(x: i32) {
+    match x {
+        0 => {}
+        _ => {}
+    }
+}
+"#;
+    let k = kinds_sample(Language::Rust, src);
+    assert!(
+        k.contains(&UnifiedKind::Branch(BranchKind::Match)),
+        "expected Branch(Match), got {k:?}"
+    );
+}
+
+#[test]
+fn c_switch_classified_as_branch_switch() {
+    let src = r#"
+void f(int x) {
+  switch (x) { case 0: break; }
+}
+"#;
+    let k = kinds_sample(Language::C, src);
+    assert!(
+        k.contains(&UnifiedKind::Branch(BranchKind::Switch)),
+        "expected Branch(Switch), got {k:?}"
     );
 }
 
@@ -126,7 +157,7 @@ void f() {
             UnifiedKind::Loop(LoopKind::ForEach),
             UnifiedKind::Loop(LoopKind::While),
             UnifiedKind::Loop(LoopKind::DoWhile),
-            UnifiedKind::If,
+            UnifiedKind::Branch(BranchKind::If),
         ]
     );
 }

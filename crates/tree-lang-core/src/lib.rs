@@ -28,12 +28,23 @@ pub enum LoopKind {
     Infinite,
 }
 
-/// Cross-language syntax matched in the MVP (functions, loops, conditionals).
+/// Branching / multi-way control after lowering (if, switch, pattern match).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BranchKind {
+    /// `if` / `else` (and language equivalents).
+    If,
+    /// C/C++/Java `switch` statements.
+    Switch,
+    /// Rust `match`, Python 3.10+ `match`.
+    Match,
+}
+
+/// Cross-language syntax matched in the MVP (functions, loops, branches).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UnifiedKind {
     FunctionDefinition,
     Loop(LoopKind),
-    If,
+    Branch(BranchKind),
 }
 
 /// One tree-sitter subtree classified as a unified construct.

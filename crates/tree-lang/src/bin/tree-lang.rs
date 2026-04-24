@@ -7,8 +7,9 @@ use regex::Regex;
 use walkdir::WalkDir;
 
 use tree_lang::{
-    find_function_definitions, find_unified_kinds, for_each_subtree_node, map_unified_node, parse,
-    Language, LoopKind, MappedNode, TreeTraversal, UnifiedKind,
+    find_function_definitions, find_unified_kinds, format_kind, for_each_subtree_node,
+    kinds_from_cli, map_unified_node, parse, Language, MappedNode, TreeTraversal,
+    UnifiedKind,
 };
 
 #[path = "../internal/pipeline.rs"]
@@ -23,7 +24,7 @@ const STEP_ARG_LONG_HELP: &str = r"Pipeline steps — repeat `--step`; order mat
 
   assign:NAME:SOURCE    a:NAME:SOURCE
       Bind a span from the current node. SOURCE is one of: node, content, body;
-      for if-nodes, consequence is also allowed.
+      for branch:if nodes, consequence is also allowed.
 
   has:VAR:KIND         h:VAR:KIND
       First unified KIND inside span VAR; current becomes that node.
@@ -36,7 +37,7 @@ const STEP_ARG_LONG_HELP: &str = r"Pipeline steps — repeat `--step`; order mat
       One line: {name} bindings, then the same placeholders as --print-format.
 
   strip                strip:   s:
-      No arguments. Replace current with the leftmost loop, if, or
+      No arguments. Replace current with the leftmost loop, branch (if/switch/match), or
       function_definition in the current span (trim leading/trailing non-block syntax).
 
   next:NAME
@@ -119,8 +120,8 @@ struct FindArgs {
     /// Target language: c, cpp, java, python, rust, auto (default: auto).
     #[arg(short = 'l', long = "language", value_name = "LANG", default_value = "auto")]
     language: String,
-    /// Unified syntax kind: function_definition, if, loop, loop:<subtype> (e.g. loop:for), or
-    /// loop(<subtype>) matching default output (e.g. loop(for) → same as loop:for).
+    /// Unified syntax kind: function_definition, branch, branch:<subtype> (e.g. branch:if),
+    /// branch(<subtype>) (e.g. branch(if)), loop, loop:<subtype>, loop(<subtype>).
     #[arg(short = 'k', long = "kind", value_name = "KIND")]
     kind: String,
     /// Match the name of found structures (when the selected kind has names, e.g. functions).
@@ -897,61 +898,6 @@ fn collect_targets_auto(root: &Path, exclude: &[Regex]) -> Result<Vec<PathBuf>, 
 fn is_excluded(path: &Path, exclude: &[Regex]) -> bool {
     let s = path.to_string_lossy();
     exclude.iter().any(|re| re.is_match(s.as_ref()))
-}
-
-fn parse_loop_subtype(sub: &str) -> Result<LoopKind, String> {
-    let sub = sub.trim().replace('-', "_");
-    match sub.as_str() {
-        "for" => Ok(LoopKind::For),
-        "foreach" | "for_each" => Ok(LoopKind::ForEach),
-        "while" => Ok(LoopKind::While),
-        "dowhile" | "do_while" => Ok(LoopKind::DoWhile),
-        "infinite" | "forever" => Ok(LoopKind::Infinite),
-        other => Err(format!(
-            "unknown loop subtype {other:?}: use for, foreach, while, dowhile, or infinite (see README)"
-        )),
-    }
-}
-
-pub(crate) fn kinds_from_cli(s: &str) -> Result<Vec<UnifiedKind>, String> {
-    let normalized = s.trim().to_ascii_lowercase().replace('-', "_");
-    if let Some(sub) = normalized.strip_prefix("loop:") {
-        let lk = parse_loop_subtype(sub)?;
-        return Ok(vec![UnifiedKind::Loop(lk)]);
-    }
-    // Same subtypes as `loop:…`, but matches default `{type}` output (`Loop(For)`, …).
-    if let Some(inner) = normalized
-        .strip_prefix("loop(")
-        .and_then(|rest| rest.strip_suffix(')'))
-    {
-        let inner = inner.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-        let lk = parse_loop_subtype(&inner)?;
-        return Ok(vec![UnifiedKind::Loop(lk)]);
-    }
-    match normalized.as_str() {
-        "functiondefinition" | "function_definition" | "fn" | "func" => {
-            Ok(vec![UnifiedKind::FunctionDefinition])
-        }
-        "if" => Ok(vec![UnifiedKind::If]),
-        "loop" => Ok(vec![
-            UnifiedKind::Loop(LoopKind::For),
-            UnifiedKind::Loop(LoopKind::ForEach),
-            UnifiedKind::Loop(LoopKind::While),
-            UnifiedKind::Loop(LoopKind::DoWhile),
-            UnifiedKind::Loop(LoopKind::Infinite),
-        ]),
-        _ => Err(format!(
-            "unknown kind {s:?}: expected function_definition, if, loop, loop:<subtype>, or loop(<subtype>) (see README)"
-        )),
-    }
-}
-
-pub(crate) fn format_kind(k: UnifiedKind) -> String {
-    match k {
-        UnifiedKind::FunctionDefinition => "FunctionDefinition".to_string(),
-        UnifiedKind::If => "If".to_string(),
-        UnifiedKind::Loop(lk) => format!("Loop({lk:?})"),
-    }
 }
 
 /// 1-based line, 0-based UTF-8 column within that line (byte offset from line start).

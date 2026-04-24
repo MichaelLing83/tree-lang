@@ -1,6 +1,6 @@
 //! Parse source with tree-sitter and classify MVP syntax into [`tree_lang_core`] kinds.
 //!
-//! MVP: C, C++, Java, Rust, Python — function definitions, loops, `if`/`else`.
+//! MVP: C, C++, Java, Rust, Python — function definitions, loops, branches (`if`, `switch`, `match`).
 
 use std::collections::VecDeque;
 
@@ -8,7 +8,7 @@ mod classify;
 mod language;
 
 pub use language::Language;
-pub use tree_lang_core::{LoopKind, MappedNode, Span, UnifiedKind};
+pub use tree_lang_core::{BranchKind, LoopKind, MappedNode, Span, UnifiedKind};
 pub use tree_sitter::{Node, Tree};
 
 use classify::classify;
@@ -261,10 +261,14 @@ fn span_from_field(node: Node<'_>, field: &str) -> Option<Span> {
     Some(Span::new(n.range().start_byte, n.range().end_byte))
 }
 
-/// Primary body span for unified kinds: `body` for functions/loops, `consequence` for `if` when present.
+/// Primary body span for unified kinds: `body` for functions/loops/switch/match; `consequence`
+/// for `if` then-branch when present.
 fn unified_body_span(_language: Language, node: Node<'_>, kind: UnifiedKind) -> Option<Span> {
     match kind {
-        UnifiedKind::If => span_from_field(node, "consequence").or_else(|| span_from_field(node, "body")),
+        UnifiedKind::Branch(BranchKind::If) => {
+            span_from_field(node, "consequence").or_else(|| span_from_field(node, "body"))
+        }
+        UnifiedKind::Branch(BranchKind::Switch | BranchKind::Match) => span_from_field(node, "body"),
         UnifiedKind::FunctionDefinition | UnifiedKind::Loop(_) => span_from_field(node, "body"),
     }
 }
@@ -561,5 +565,89 @@ fn node_text(node: Node<'_>, source: &[u8]) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn parse_loop_subtype(sub: &str) -> Result<LoopKind, String> {
+    let sub = sub.trim().replace('-', "_");
+    match sub.as_str() {
+        "for" => Ok(LoopKind::For),
+        "foreach" | "for_each" => Ok(LoopKind::ForEach),
+        "while" => Ok(LoopKind::While),
+        "dowhile" | "do_while" => Ok(LoopKind::DoWhile),
+        "infinite" | "forever" => Ok(LoopKind::Infinite),
+        other => Err(format!(
+            "unknown loop subtype {other:?}: use for, foreach, while, dowhile, or infinite (see README)"
+        )),
+    }
+}
+
+fn parse_branch_subtype(sub: &str) -> Result<BranchKind, String> {
+    let sub = sub.trim().replace('-', "_");
+    match sub.as_str() {
+        "if" => Ok(BranchKind::If),
+        "switch" => Ok(BranchKind::Switch),
+        "match" => Ok(BranchKind::Match),
+        other => Err(format!(
+            "unknown branch subtype {other:?}: use if, switch, or match (see README)"
+        )),
+    }
+}
+
+/// Parse CLI / API kind strings (`function_definition`, `branch`, `branch:if`, `loop:for`, …).
+pub fn kinds_from_cli(s: &str) -> Result<Vec<UnifiedKind>, String> {
+    let normalized = s.trim().to_ascii_lowercase().replace('-', "_");
+    if let Some(sub) = normalized.strip_prefix("loop:") {
+        let lk = parse_loop_subtype(sub)?;
+        return Ok(vec![UnifiedKind::Loop(lk)]);
+    }
+    if let Some(inner) = normalized
+        .strip_prefix("loop(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let inner = inner.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let lk = parse_loop_subtype(&inner)?;
+        return Ok(vec![UnifiedKind::Loop(lk)]);
+    }
+    if let Some(sub) = normalized.strip_prefix("branch:") {
+        let bk = parse_branch_subtype(sub)?;
+        return Ok(vec![UnifiedKind::Branch(bk)]);
+    }
+    if let Some(inner) = normalized
+        .strip_prefix("branch(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let inner = inner.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let bk = parse_branch_subtype(&inner)?;
+        return Ok(vec![UnifiedKind::Branch(bk)]);
+    }
+    match normalized.as_str() {
+        "functiondefinition" | "function_definition" | "fn" | "func" => {
+            Ok(vec![UnifiedKind::FunctionDefinition])
+        }
+        "branch" => Ok(vec![
+            UnifiedKind::Branch(BranchKind::If),
+            UnifiedKind::Branch(BranchKind::Switch),
+            UnifiedKind::Branch(BranchKind::Match),
+        ]),
+        "loop" => Ok(vec![
+            UnifiedKind::Loop(LoopKind::For),
+            UnifiedKind::Loop(LoopKind::ForEach),
+            UnifiedKind::Loop(LoopKind::While),
+            UnifiedKind::Loop(LoopKind::DoWhile),
+            UnifiedKind::Loop(LoopKind::Infinite),
+        ]),
+        _ => Err(format!(
+            "unknown kind {s:?}: expected function_definition, branch, branch:<subtype>, branch(<subtype>), loop, loop:<subtype>, or loop(<subtype>) (see README)"
+        )),
+    }
+}
+
+/// Default string used in CLI output and `{type}` templates.
+pub fn format_kind(k: UnifiedKind) -> String {
+    match k {
+        UnifiedKind::FunctionDefinition => "FunctionDefinition".to_string(),
+        UnifiedKind::Branch(bk) => format!("Branch({bk:?})"),
+        UnifiedKind::Loop(lk) => format!("Loop({lk:?})"),
     }
 }

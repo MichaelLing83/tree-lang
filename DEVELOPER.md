@@ -65,21 +65,23 @@ Examples:
   - `function_definition` -> `FunctionDefinition`
   - `for_statement` -> `Loop(For)`
   - `while_statement` -> `Loop(While)`
-  - `if_statement` -> `If`
+  - `if_statement` -> `Branch(If)`
+  - `match_statement` -> `Branch(Match)`
 - Rust:
   - `function_item` -> `FunctionDefinition`
   - `for_expression` -> `Loop(For)`
   - `while_expression` -> `Loop(While)`
   - `loop_expression` -> `Loop(Infinite)`
-  - `if_expression` -> `If`
+  - `if_expression` -> `Branch(If)`
+  - `match_expression` -> `Branch(Match)`
 - Java:
   - `method_declaration` -> `FunctionDefinition`
   - `enhanced_for_statement` -> `Loop(ForEach)`
-  - plus `for_statement`, `while_statement`, `do_statement`, `if_statement`
+  - plus `for_statement`, `while_statement`, `do_statement`, `if_statement` -> `Branch(If)`, `switch_statement` -> `Branch(Switch)`
 - C / C++:
   - `function_definition` -> `FunctionDefinition`
   - C++ `for_range_loop` -> `Loop(ForEach)`
-  - plus `for_statement`, `while_statement`, `do_statement`, `if_statement`
+  - plus `for_statement`, `while_statement`, `do_statement`, `if_statement` -> `Branch(If)`, `switch_statement` -> `Branch(Switch)`
 
 Any node kind not in the table returns `None` and is ignored by MVP extraction.
 
