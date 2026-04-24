@@ -14,6 +14,43 @@ use tree_lang::{
 #[path = "../internal/pipeline.rs"]
 mod pipeline;
 
+/// Short help for `-h` (full step grammar is in [`STEP_ARG_LONG_HELP`]).
+const STEP_ARG_HELP_SHORT: &str =
+    "Pipeline step; repeat with --step (order matters). Use --help for full syntax.";
+
+/// Long help for `--step` (shared by `find` and all traverse subcommands).
+const STEP_ARG_LONG_HELP: &str = r"Pipeline steps — repeat `--step`; order matters.
+
+  assign:NAME:SOURCE    a:NAME:SOURCE
+      Bind a span from the current node. SOURCE is one of: node, content, body;
+      for if-nodes, consequence is also allowed.
+
+  has:VAR:KIND         h:VAR:KIND
+      First unified KIND inside span VAR; current becomes that node.
+
+  is:VAR:KIND          i:VAR:KIND
+      Span VAR must re-parse as a unified root of KIND covering the whole text
+      (structural match), not substring containment.
+
+  print:TEMPLATE       p:TEMPLATE
+      One line: {name} bindings, then the same placeholders as --print-format.
+
+  strip                strip:   s:
+      No arguments. Replace current with the leftmost loop, if, or
+      function_definition in the current span (trim leading/trailing non-block syntax).
+
+  next:NAME
+      Next named sibling that is a unified node; bind to NAME and select it.
+
+  expand:NAME
+      Bind current's body span to NAME; re-parse the body and move current there.
+
+Restriction (subcommand find only): --step cannot be used with function_definition
+filters (--name, --param-*, --return-type, --param-name-at, --param-type-at).
+
+Example:
+  --step assign:ob:body --step has:ob:loop:for --step 'print:{file} {type}'";
+
 #[derive(Parser)]
 #[command(name = "tree-lang", version, about = "Unified syntax search over source trees")]
 struct Cli {
@@ -43,12 +80,12 @@ struct TraverseArgs {
     /// Print using a format template (same as `find`).
     #[arg(long = "print-format", value_name = "TEMPLATE")]
     print_format: Option<String>,
-    /// Pipeline steps; same grammar as `find` — runs from the current node at each
-    /// unified-syntax hit, in the chosen tree walk order. Repeat; order matters.
     #[arg(
         long = "step",
         value_name = "STEP",
-        action = clap::ArgAction::Append
+        action = clap::ArgAction::Append,
+        help = STEP_ARG_HELP_SHORT,
+        long_help = STEP_ARG_LONG_HELP
     )]
     step: Vec<String>,
 }
@@ -117,22 +154,12 @@ struct FindArgs {
     /// Supported placeholders: {file},{type},{start},{end},{range},{name},{content},{body},{language},{start_byte},{end_byte},{body_start_byte},{body_end_byte}
     #[arg(long = "print-format", value_name = "TEMPLATE")]
     print_format: Option<String>,
-    /// Ordered find pipeline. Repeat; order matters. Each value uses one of:
-    /// `assign:NAME:SOURCE` or `a:...` (from current: node, content, body, or consequence for if);
-    /// `has:VAR:KIND` or `h:...` (first match of KIND inside span VAR, then current = that node);
-    /// `is:VAR:KIND` or `i:...` (span VAR must parse as a unified root of that kind covering the
-    /// whole text — structural, not "contains");
-    /// `print:TEMPLATE` or `p:...` (one line: bindings `{name}` then `find` template fields);
-    /// `strip` / `strip:` / `s:` (no args: replace `current` with the leftmost loop, `if`, or
-    /// `function_definition` in the current span's text, trimming leading / trailing other syntax);
-    /// `next:NAME` (bind the next named sibling that is a unified node to `NAME`, and select it);
-    /// `expand:NAME` (bind `current`'s `body` span to `NAME` and move `current` into that body).
-    /// Not valid with `function_definition` filters. Example:
-    /// `--step assign:ob:body --step has:ob:loop:for --step 'print:{file} {type}'`
     #[arg(
         long = "step",
         value_name = "STEP",
-        action = clap::ArgAction::Append
+        action = clap::ArgAction::Append,
+        help = STEP_ARG_HELP_SHORT,
+        long_help = STEP_ARG_LONG_HELP
     )]
     step: Vec<String>,
 }
