@@ -168,7 +168,7 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
 
 Each `find` hit (or each unified visit in **Traverse** commands) can run a short **node-centric** pipeline. Steps share a set of **bindings**—named nodes plus the built-in names `node` and `current`—and execute in order. Unless you use `emit:`, a successful pipeline ends with the usual one-line output from `--print` / `--print-format`, using the **final** `current` and all bindings when expanding templates (see *Printing and templates* in this section).
 
-**Bind names.** Use identifiers such as `x`, `b`, or `L2`. The right-hand side of an assignment is either a reserved word (`node`, `current`, `body`, `consequence`), a dotted field form `other.body` / `other.consequence`, or the query form `other.first(...)` where `other` is an existing binding (not a free expression).
+**Bind names.** Use identifiers such as `x`, `b`, or `L2`. The right-hand side of an assignment is either a reserved word (`node`, `current`, `body`, `consequence`), a dotted field form `other.body` / `other.consequence`, or the query form `other.first(...)` / `other.body.first(...)` where `other` is an existing binding (not a free expression).
 
 | Form | Meaning |
 | ---- | ------- |
@@ -181,7 +181,7 @@ Each `find` hit (or each unified visit in **Traverse** commands) can run a short
 | `x.is(KIND)` | `KIND` uses the **same grammar as `-k`** (see *Unified kinds*). The binding `x` must be one of those kinds; on success, sets **`current` ← `x`**. If it fails, this match is dropped. |
 | `x.has(KIND)` | Re-parses the text inside **`x`’s span** (as a sub-slice) and looks for a unified hit of the given `KIND` that is **strictly inside** the slice (the full-span match is not counted—same as “first inner” semantics). On success, sets **`current`** to that inner node. If there is no such node, the match is dropped. |
 | `x.first(A, B, …)` | Each argument is a `KIND` list in `-k` syntax; the set of allowed `UnifiedKind` values is the **union** of all arguments. Walks the file’s parse tree **depth-first, preorder** starting from the node covering `x`’s span, **including** `x` if it already matches, and sets **`current`** to the first matching node. If none, the match is dropped. Comma is split at the top level only; nested `loop(for)`-style kind strings are written inside the parentheses, not as extra comma arguments. |
-| `name=x.first(A, B, …)` | Same search as `x.first(...)`, but also stores the found node into `name`. On success, it also sets **`current`** to that found node. |
+| `name=x.first(A, B, …)` | Same search as `x.first(...)`, but also stores the found node into `name`. The receiver may also be `x.body` or `x.consequence`, e.g. `name=x.body.first(loop)`. On success, it also sets **`current`** to that found node. |
 | `emit:`*`TEMPLATE`* | Evaluates *TEMPLATE* like global `--print-format` and prints **one** line to stdout (mid-pipeline). Supports **dotted** placeholders `{` *name* `.` *field* `}` for any in-scope binding, plus the legacy placeholders (see the next subsection). If you use at least one `emit:`, the usual final one-line print for that hit is **not** produced (use `emit:` and/or design the pipeline so the last step is enough). |
 
 **`node` and `current` are always in scope** as binding names, alongside any names you introduce with `=…`. They are updated on each step as described above (especially `current` after `is` / `has` / `first`).
@@ -209,7 +209,7 @@ tree-lang find . -l c -k loop --step 'n=node' --step 'n.is(loop)' --step 'emit:f
 tree-lang dfs_preorder ./src -l rust --step 'c=node' --step 'c.is(loop)' --print-format '{file} {c.range}'
 
 # Bind the first function / branch / loop inside a body, then print fields from the binding
-tree-lang dfs_preorder crates -l rust --step 'n=node' --step 'n.is(loop)' --step 'b1=n.body' --step 'c1=b1.first(function_definition, branch, loop)' --print-format '{c1.type} {c1.range}'
+tree-lang dfs_preorder crates -l rust --step 'n=node' --step 'n.is(loop)' --step 'c1=n.body.first(function_definition, branch, loop)' --print-format '{c1.type} {c1.range}'
 ```
 
 ### Traverse commands (`dfs_*`, `bfs_*`)

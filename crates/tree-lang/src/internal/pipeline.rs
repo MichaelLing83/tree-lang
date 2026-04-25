@@ -12,7 +12,8 @@
 //! - ``x.first(a,b,…)`` — each argument is a ``-k`` kind spec; their union is the set of ``UnifiedKind``;
 //!   DFS (preorder) in the file tree on ``x``'s span, *including* ``x`` if it matches. Sets ``current`` to
 //!   the first hit.
-//! - ``name=x.first(a,b,…)`` — same search as above, but also stores the result under ``name``.
+//! - ``name=x.first(a,b,…)`` / ``name=x.body.first(a,b,…)`` — same search as above, but also stores
+//!   the result under ``name``. The receiver may be a binding or a binding's body / consequence span.
 //! - ``emit:…`` — one line, same template rules as ``--print-format`` (dotted and legacy).
 //!
 //! Bindings: ``node`` and ``current`` are always in scope. ``node`` = per-hit root (immutable).
@@ -486,9 +487,9 @@ fn run_first(
     on: &str,
     args: &[String],
 ) -> Result<Option<MappedNode>, String> {
-    let base = *bindings
-        .get(on)
-        .ok_or_else(|| format!("unknown name {on:?} in first()"))?;
+    let Some(base) = resolve_first_base(language, file_root, bindings, on)? else {
+        return Ok(None);
+    };
     let mut kinds: Vec<UnifiedKind> = vec![];
     for a in args {
         for k in kinds_from_cli(a.trim())? {
@@ -501,6 +502,43 @@ fn run_first(
         return Err("first: span not in tree".to_string());
     };
     first_preorder_match(language, n, &kinds)
+}
+
+fn resolve_first_base(
+    language: Language,
+    file_root: Node<'_>,
+    bindings: &HashMap<String, MappedNode>,
+    on: &str,
+) -> Result<Option<MappedNode>, String> {
+    if let Some((name, field)) = on.rsplit_once('.') {
+        let name = name.trim();
+        let field = field.trim();
+        if name.is_empty() {
+            return Err(format!("bad receiver {on:?} in first()"));
+        }
+        let base = *bindings
+            .get(name)
+            .ok_or_else(|| format!("unknown name {name:?} in first()"))?;
+        let part = match field {
+            "body" => RelBody::Body,
+            "consequence" => RelBody::Consequence,
+            other => {
+                return Err(format!(
+                    "first() receiver field must be `body` or `consequence`, not {other:?}"
+                ));
+            }
+        };
+        return Ok(match assign_body_or_consequence(language, file_root, &base, part) {
+            BodyAssign::Ok(m) => Some(m),
+            BodyAssign::NoMatch => None,
+        });
+    }
+
+    bindings
+        .get(on)
+        .copied()
+        .map(Some)
+        .ok_or_else(|| format!("unknown name {on:?} in first()"))
 }
 
 /// First tree-sitter node in DFS preorder (including `n`) that maps to a [MappedNode].
@@ -683,7 +721,7 @@ fn parse_one_step(s: &str) -> Result<StepStmt, String> {
         };
     }
     Err(format!(
-        "unrecognized --step: {s:?}. Try name=node, name=x.body, name=x.first(a,b), x.is(kinds), x.has(kinds), x.first(a,b), emit:..."
+        "unrecognized --step: {s:?}. Try name=node, name=x.body, name=x.body.first(a,b), x.is(kinds), x.has(kinds), x.first(a,b), emit:..."
     ))
 }
 

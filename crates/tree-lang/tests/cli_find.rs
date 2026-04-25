@@ -300,9 +300,9 @@ fn find_supports_assigning_first_result() {
         "-k",
         "function_definition",
         "--step",
-        "b=body",
+        "n=node",
         "--step",
-        "c1=b.first(function_definition, branch, loop)",
+        "c1=n.body.first(function_definition, branch, loop)",
         "--print-format",
         "{c1.type}:{type}",
     ]);

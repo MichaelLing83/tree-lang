@@ -37,6 +37,7 @@ const STEP_ARG_LONG_HELP: &str = r"Pipeline steps — repeat `--step`; order mat
       `x` if it matches) whose kind is in that set. Sets `current` on success.
 
   name=x.first(A,B,…) Same as x.first(...), but also binds the result to `name`.
+      The receiver may also be x.body or x.consequence, e.g. c=x.body.first(loop).
 
   emit:TEMPLATE        One line of output mid-pipeline; `TEMPLATE` is like `--print-format`
       (dotted {x.y} for bindings plus legacy {type} etc. based on `current`).
