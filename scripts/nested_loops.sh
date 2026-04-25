@@ -2,22 +2,15 @@
 # Demo: use traversal + pipeline to locate "directly nested loops".
 #
 # Definition used here:
-# - Outer node must be a loop.
-# - Enter its `body`.
-# - Skip leading non-block syntax (plain statements / punctuation) via `strip`.
-# - The first block-shaped unified node after stripping must be another loop.
+# - The traverse hit must be a loop.
+# - Its body span must contain another loop as the first ``strict inner'' unified match
+#   (same as `has`: re-parse the body slice and take the first inner, not the whole body).
 #
-# This models: outer loop body contains one or more ordinary statements, then a loop.
-# (Current step DSL cannot strictly enforce "at least one" ordinary statement before
-# the inner loop; this demo checks that the first block-shaped construct is a loop.)
-#
-# Pipeline explained:
-#   assign:n:node  -> bind current span to n
-#   is:n:loop      -> current root must be a loop (filter non-loops)
-#   expand:b       -> move current into outer loop body span
-#   strip          -> narrow current to first block-shaped node in that body
-#   assign:s:node  -> bind stripped span
-#   is:s:loop      -> stripped node must be a loop (direct nested loop hit)
+# Pipeline:
+#   n=node        -> the per-hit root (the candidate loop)
+#   n.is(loop)    -> must be a loop
+#   b=body        -> bind the full body area (any inner unified shape is the representative `kind`)
+#   b.has(loop)   -> first inner loop in that body = direct nested loop
 #
 # Options:
 #   -m, --multiline  After each match, print file/range on separate lines, then the
@@ -98,12 +91,10 @@ echo ""
 
 run_treelang() {
   "$T" dfs_preorder "$ROOT" -l "$LANG" \
-    --step 'assign:n:node' \
-    --step 'is:n:loop' \
-    --step 'expand:b' \
-    --step 'strip' \
-    --step 'assign:s:node' \
-    --step 'is:s:loop' \
+    --step 'n=node' \
+    --step 'n.is(loop)' \
+    --step 'b=body' \
+    --step 'b.has(loop)' \
     "$@"
 }
 

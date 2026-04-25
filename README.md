@@ -17,7 +17,7 @@ The same logical construct uses **different spellings** depending on whether you
 
 | Layer | Role | Examples |
 | ----- | ---- | -------- |
-| **CLI input** | `-k` / `--kind`, and the `KIND` part of `has:…:KIND` / `is:…:KIND` in `--step` | `function_definition`, `branch`, `branch:if`, `branch:switch`, `branch:match`, `loop`, `loop:for`, … |
+| **CLI input** | `-k` / `--kind`, and the `KIND` argument in `x.has(KIND)` / `x.is(KIND)` in `--step` | `function_definition`, `branch`, `branch:if`, `branch:switch`, `branch:match`, `loop`, `loop:for`, … |
 | **CLI output** | Default `find` / traverse lines and `{type}` in templates | `FunctionDefinition`, `Branch(If)`, `Branch(Switch)`, `Loop(For)`, … |
 | **Rust API** | `tree_lang_core::UnifiedKind`, `LoopKind`, `BranchKind` | e.g. `UnifiedKind::Branch(BranchKind::If)` |
 
@@ -161,8 +161,52 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
     - `{body}`, `{language}`, `{start_byte}`, `{end_byte}`, `{body_start_byte}`, `{body_end_byte}`
 
 - `--step <STEP>` (repeatable; `find` only when not using function-definition name/param filters)
-  - ordered pipeline over each match; same `--step` grammar on traverse subcommands (below)
-  - full syntax: `tree-lang find --help` (long help lists every step kind)
+  - one statement per flag; order matters. Full grammar is in [**Step pipeline (detailed)**](#step-pipeline) below, and in `tree-lang find --help`.
+
+<a id="step-pipeline"></a>
+#### Step pipeline (`--step`)
+
+Each `find` hit (or each unified visit in **Traverse** commands) can run a short **node-centric** pipeline. Steps share a set of **bindings**—named nodes plus the built-in names `node` and `current`—and execute in order. Unless you use `emit:`, a successful pipeline ends with the usual one-line output from `--print` / `--print-format`, using the **final** `current` and all bindings when expanding templates (see *Printing and templates* in this section).
+
+**Bind names.** Use identifiers such as `x`, `b`, or `L2`. The right-hand side of an assignment is either a reserved word (`node`, `current`, `body`, `consequence`) or a dotted form `other.body` / `other.consequence` where `other` is an existing binding (not a free expression).
+
+| Form | Meaning |
+| ---- | ------- |
+| `name=node` | Binds the **per-hit root**: the `find` / traverse match. This value does **not** change when the pipeline later moves `current` (it is not “whatever `current` is right now”). |
+| `name=current` | Binds the **pipeline focus** at this step: whatever `current` is after any previous `is` / `has` / `first` (initially the same as `node`). |
+| `name=body` | Same as `name=current.body` in spirit: the **primary body span** of the **current** node at this step. If the tree at that exact span is not a unified root, the implementation walks **into** the span in parse-tree order and takes the first inner construct that has a unified kind, while still using the **full** body span for operations that need the whole range (e.g. `x.has(…)`). If nothing fits, the whole hit is **skipped** (no error line for that candidate). |
+| `name=consequence` | Same for the then-branch of **`branch:if` only** (equivalent to `=current.consequence` when it applies). If the current node is not an `if`, the hit is skipped. |
+| `name=x.body` | The body span of an **existing** binding `x` (e.g. `b1=n.body` after `n=node`). Unknown `x` is a pipeline error. |
+| `name=x.consequence` | The if-then span of binding `x` when it is a `branch:if` (same rules as `=consequence` on `current`). |
+| `x.is(KIND)` | `KIND` uses the **same grammar as `-k`** (see *Unified kinds*). The binding `x` must be one of those kinds; on success, sets **`current` ← `x`**. If it fails, this match is dropped. |
+| `x.has(KIND)` | Re-parses the text inside **`x`’s span** (as a sub-slice) and looks for a unified hit of the given `KIND` that is **strictly inside** the slice (the full-span match is not counted—same as “first inner” semantics). On success, sets **`current`** to that inner node. If there is no such node, the match is dropped. |
+| `x.first(A, B, …)` | Each argument is a `KIND` list in `-k` syntax; the set of allowed `UnifiedKind` values is the **union** of all arguments. Walks the file’s parse tree **depth-first, preorder** starting from the node covering `x`’s span, **including** `x` if it already matches, and sets **`current`** to the first matching node. If none, the match is dropped. Comma is split at the top level only; nested `loop(for)`-style kind strings are written inside the parentheses, not as extra comma arguments. |
+| `emit:`*`TEMPLATE`* | Evaluates *TEMPLATE* like global `--print-format` and prints **one** line to stdout (mid-pipeline). Supports **dotted** placeholders `{` *name* `.` *field* `}` for any in-scope binding, plus the legacy placeholders (see the next subsection). If you use at least one `emit:`, the usual final one-line print for that hit is **not** produced (use `emit:` and/or design the pipeline so the last step is enough). |
+
+**`node` and `current` are always in scope** as binding names, alongside any names you introduce with `=…`. They are updated on each step as described above (especially `current` after `is` / `has` / `first`).
+
+**Printing and templates (after the last step, or in `emit:`).**
+
+- **Dotted** placeholders: `{` *binding* `.` *field* `}`. *binding* is an identifier or `node` / `current`. *field* includes: `type`, `start`, `end`, `range`, `content`, `body`, `file`, `language`, `start_byte`, `end_byte`, `body_start` / `body_start_byte`, `body_end` / `body_end_byte` (and similar aliases as implemented in the tool).
+- **Legacy** (single-name) placeholders such as `{type}`, `{file}`, `{range}` refer to the **final** `current` node, after all steps.
+- `{node}` and `{current}` expand to the **escaped** full source text of the root hit and the final `current`, respectively.
+- For any other binding *name* you created, `{`*name*`}` is replaced by that node’s full-span escaped text.
+- Dotted and legacy can be combined in one template; a second expansion phase applies the legacy set after the dotted pass.
+
+**`find` restriction:** `--step` cannot be combined with function-only filters on `find` (`--name`, `--param-*`, `--return-type`, `--param-name-at`, `--param-type-at`).
+
+**Examples**
+
+```bash
+# Inner loop under an outer (body → has) and print the inner’s kind; same idea as a two-level “nested loop” check
+tree-lang find ./src -l rust -k loop --step 'b=body' --step 'b.has(loop)' --print-format '{b.type} {file} {current.range}'
+
+# Bind the hit, require it to be a loop, emit one line mid-pipeline
+tree-lang find . -l c -k loop --step 'n=node' --step 'n.is(loop)' --step 'emit:found {n.file} {n.type}'
+
+# Traverse: only unified visits; at each, filter with is(…) and custom format
+tree-lang dfs_preorder ./src -l rust --step 'c=node' --step 'c.is(loop)' --print-format '{file} {c.range}'
+```
 
 ### Traverse commands (`dfs_*`, `bfs_*`)
 
@@ -177,7 +221,7 @@ Subcommands:
 They take paths, `-l` / `--language`, `-e` / `--exclude`, and the same printing / `--step` options as documented for `find` (without `-k` / function filters). Example:
 
 ```bash
-tree-lang dfs_preorder ./src -l rust --step 'assign:n:node' --step 'is:n:loop' --step 'p:{file} {type}'
+tree-lang dfs_preorder ./src -l rust --step 'n=node' --step 'n.is(loop)' --step 'emit:{file} {type}'
 ```
 
 ### Output Format

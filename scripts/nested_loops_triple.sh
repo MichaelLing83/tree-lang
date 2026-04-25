@@ -1,26 +1,13 @@
 #!/usr/bin/env bash
 # Demo: use traversal + pipeline to locate "directly nested" three-level loops.
 #
-# Definition used here (same family as scripts/nested_loops.sh, one more level):
-# - Outermost node must be a loop.
-# - Enter its `body`, `strip` to the first block-shaped node -> must be a loop (L2).
-# - Enter L2's `body`, `strip` to the first block-shaped node -> must be a loop (L3).
+# Definition: from an outermost loop (L1), the first ``strict inner'' loop in L1's body
+# is L2, and the first strict inner loop in L2's body is L3.
 #
-# Same limitation as the two-level script: this checks that after each strip, the
-# first block-shaped unified node is a loop; it does not count "N plain statements
-# then a loop" in the current DSL.
-#
-# Pipeline (each line is one --step, in order):
-#   assign:n:node  -> bind current
-#   is:n:loop      -> L1 must be a loop
-#   expand:o       -> current := parse of L1 body (re-rooted)
-#   strip          -> first block in L1 body
-#   assign:m:node  -> bind
-#   is:m:loop      -> L2 must be a loop
-#   expand:mi      -> current := parse of L2 body
-#   strip          -> first block in L2 body
-#   assign:i:node  -> bind
-#   is:i:loop      -> L3 must be a loop (three-level direct nesting under this model)
+# Pipeline (each --step, in order):
+#   n=node, n.is(loop)   -> L1
+#   b1=n.body, b1.has(loop) -> L2, then l2=current, l2.is(loop)
+#   b2=l2.body, b2.has(loop) -> L3, then l3=current, l3.is(loop)
 #
 # Options:
 #   -m, --multiline  For each match, print file, range, then the raw source span
@@ -91,16 +78,16 @@ echo ""
 
 run_treelang() {
   "$T" dfs_preorder "$ROOT" -l "$LANG" \
-    --step 'assign:n:node' \
-    --step 'is:n:loop' \
-    --step 'expand:o' \
-    --step 'strip' \
-    --step 'assign:m:node' \
-    --step 'is:m:loop' \
-    --step 'expand:mi' \
-    --step 'strip' \
-    --step 'assign:i:node' \
-    --step 'is:i:loop' \
+    --step 'n=node' \
+    --step 'n.is(loop)' \
+    --step 'b1=n.body' \
+    --step 'b1.has(loop)' \
+    --step 'l2=current' \
+    --step 'l2.is(loop)' \
+    --step 'b2=l2.body' \
+    --step 'b2.has(loop)' \
+    --step 'l3=current' \
+    --step 'l3.is(loop)' \
     "$@"
 }
 

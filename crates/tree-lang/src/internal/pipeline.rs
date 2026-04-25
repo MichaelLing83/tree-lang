@@ -1,186 +1,438 @@
-//! Ordered find/traverse pipeline: ``--step`` with `assign|a`, `next:`, `expand:`, `has|h`, `is|i`,
-//! `print|p`, `strip`. See `find --help` and `tree-lang dfs_preorder` / `dfs_postorder` / `bfs_ltr` / `bfs_rtl` --help`.
+//! ``--step`` / ``--print-format`` pipeline: node-centric statements on the current match and named bindings.
+//!
+//! One ``--step`` = one of:
+//! - ``name=node|current|body|consequence`` and ``name=other.body|other.consequence`` — ``=node`` copies
+//!   the per-hit **root**; ``=current`` the focus; ``=body`` / ``=consequence`` use **current**'s body or
+//!   if-then span; ``x.body`` / ``x.consequence`` use another binding's span. Does *not* move ``current``
+//!   by itself; updates ``name`` in the binding map.
+//! - ``x.is(kinds)`` — ``kinds`` is the same grammar as ``-k`` (e.g. ``loop``, ``loop:for``, ``branch:match``).
+//!   Succeeds if the unified kind of binding ``x`` is among those; sets ``current`` to ``x``.
+//! - ``x.has(kinds)`` — within ``x``'s span, first *strict* inner unified hit (re-parse, skip root
+//!   filling the whole slice, same as old ``has``), sets ``current``.
+//! - ``x.first(a,b,…)`` — each argument is a ``-k`` kind spec; their union is the set of ``UnifiedKind``;
+//!   DFS (preorder) in the file tree on ``x``'s span, *including* ``x`` if it matches. Sets ``current`` to
+//!   the first hit.
+//! - ``emit:…`` — one line, same template rules as ``--print-format`` (dotted and legacy).
+//!
+//! Bindings: ``node`` and ``current`` are always in scope. ``node`` = per-hit root (immutable).
+//! ``current`` moves on ``is`` / ``has`` / ``first`` / after a successful chain.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use tree_sitter::Node;
 use tree_lang::{
-    find_unified_kinds, format_kind, kinds_from_cli, map_unified_node, match_root_as_unified, parse,
-    BranchKind, Language, MappedNode, Span, UnifiedKind,
+    find_unified_kinds, format_kind, kinds_from_cli, map_unified_node, parse, BranchKind, Language,
+    MappedNode, Span, UnifiedKind,
 };
 
 use crate::{byte_to_line_col, render_template, span_text};
 
+/// Program is a list of one-line statements, one per ``--step``.
 #[derive(Debug, Clone)]
-pub enum PipelineStep {
-    Assign { name: String, source: String },
-    /// Next named sibling in the full parse tree that classifies as a unified node; bind span to
-    /// `var` and set `current` to that node.
-    Next { var: String },
-    /// `current` must have a `body` span: bind that span to `var` and move `current` into the
-    /// body (re-parse; if the body root is unified and spans the whole body, use that node).
-    Expand { var: String },
-    Has { var: String, kind_cli: String },
-    /// Root of the parse of `var`'s span must be a unified node spanning the whole slice and match KIND.
-    Is { var: String, kind_cli: String },
-    /// Narrow `current` to the leftmost loop / `if` / function in its source span (drop leading and trailing non-block syntax).
-    Strip,
-    Print { template: String },
+pub struct StepProgram {
+    steps: Vec<StepStmt>,
+}
+
+impl StepProgram {
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+enum StepStmt {
+    Assign {
+        name: String,
+        source: AssignSource,
+    },
+    Is { on: String, kind: String },
+    Has { on: String, kind: String },
+    First { on: String, args: Vec<String> },
+    Emit { template: String },
+}
+
+/// Which field to take in an ``=…body`` / ``=…consequence`` assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelBody {
+    Body,
+    Consequence,
+}
+
+#[derive(Debug, Clone)]
+enum AssignSource {
+    /// Per-hit root (find / traverse), not the moving [AfterPipeline::current].
+    Node,
+    /// The pipeline focus at this step (moves on ``is`` / ``has`` / ``first``).
+    Current,
+    /// ``=body`` or ``=consequence`` (relative to **current**).
+    Relative(RelBody),
+    /// ``=x.body`` or ``=x.consequence`` (relative to binding ``x``).
+    OnBinding { on: String, part: RelBody },
 }
 
 pub struct PipelineRunOutcome {
-    /// When true, emit one line for the **root** match with `--print` / default output.
     pub need_default_print: bool,
+    /// If steps ran, last ``current``; else none (caller can use the root match only).
+    pub after: Option<AfterPipeline>,
 }
 
-/// Longer prefixes first so `is:` wins over `i:` and `assign:` over `a:`.
-fn split_step_prefix(s: &str) -> Option<(&'static str, &str)> {
-    const PAIRS: &[(&str, &'static str)] = &[
-        ("assign:", "assign"),
-        ("expand:", "expand"),
-        ("next:", "next"),
-        ("strip:", "strip"),
-        ("print:", "print"),
-        ("has:", "has"),
-        ("is:", "is"),
-        ("a:", "assign"),
-        ("h:", "has"),
-        ("p:", "print"),
-        ("i:", "is"),
-        ("s:", "strip"),
-    ];
-    for (prefix, kind) in PAIRS {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            return Some((*kind, rest));
+pub struct AfterPipeline {
+    pub node: MappedNode,
+    pub current: MappedNode,
+    pub bindings: HashMap<String, MappedNode>,
+}
+
+// --- public API -------------------------------------------------------------
+
+pub fn parse_steps(step_strings: &[String]) -> Result<StepProgram, String> {
+    let mut v = Vec::new();
+    for s in step_strings {
+        let s = s.trim();
+        if s.is_empty() {
+            continue;
+        }
+        v.push(parse_one_step(s)?);
+    }
+    Ok(StepProgram { steps: v })
+}
+
+/// Run pipeline. On success, ``root`` is the per-hit root; **current** and bindings evolve from it.
+/// Default print (when no ``emit:``) uses the **root**'s one-line or ``--print-format`` with ``AfterPipeline``.
+pub fn run_unified_pipeline(
+    path: &Path,
+    source: &str,
+    language: Language,
+    root: &MappedNode,
+    program: &StepProgram,
+) -> Result<Option<PipelineRunOutcome>, String> {
+    if program.is_empty() {
+        return Ok(Some(PipelineRunOutcome {
+            need_default_print: true,
+            after: Some(AfterPipeline {
+                node: *root,
+                current: *root,
+                bindings: default_bindings(*root),
+            }),
+        }));
+    }
+    let tree = parse(language, source)
+        .map_err(|e: tree_lang::ParseError| format!("parse file: {e}"))?;
+    let file_root = tree.root_node();
+    let mut current = *root;
+    let node_root = *root;
+    let mut bindings = default_bindings(*root);
+    let mut has_emit = false;
+
+    for s in &program.steps {
+        match s {
+            StepStmt::Assign { name, source: src } => {
+                let m = match &src {
+                    AssignSource::Node => node_root,
+                    AssignSource::Current => current,
+                    AssignSource::Relative(part) => {
+                        match assign_body_or_consequence(
+                            language,
+                            file_root,
+                            &current,
+                            *part,
+                        ) {
+                            BodyAssign::Ok(m) => m,
+                            BodyAssign::NoMatch => {
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    AssignSource::OnBinding { on, part } => {
+                        let base = *bindings
+                            .get(on)
+                            .ok_or_else(|| format!("unknown name {on:?} in =…body / =…consequence"))?;
+                        match assign_body_or_consequence(language, file_root, &base, *part) {
+                            BodyAssign::Ok(m) => m,
+                            BodyAssign::NoMatch => {
+                                return Ok(None);
+                            }
+                        }
+                    }
+                };
+                bindings.insert(name.clone(), m);
+            }
+            StepStmt::Is { on, kind } => {
+                let x = *bindings
+                    .get(on)
+                    .ok_or_else(|| format!("unknown name {on:?} in is()"))?;
+                let allowed = kinds_from_cli(kind.as_str())?;
+                if !allowed.contains(&x.kind) {
+                    return Ok(None);
+                }
+                current = x;
+                bindings.insert("current".to_string(), current);
+            }
+            StepStmt::Has { on, kind } => {
+                let sp = bindings
+                    .get(on)
+                    .ok_or_else(|| format!("unknown name {on:?} in has()"))?
+                    .span;
+                let slice = source
+                    .get(sp.start_byte..sp.end_byte)
+                    .ok_or_else(|| "has: span out of range".to_string())?;
+                if slice.is_empty() {
+                    return Ok(None);
+                }
+                let target = kinds_from_cli(kind.as_str())?;
+                let found = find_unified_kinds(language, slice, &target);
+                let m = found.ok().and_then(|v| {
+                    let slen = slice.len();
+                    v.into_iter()
+                        .find(|m| m.span.start_byte != 0 || m.span.end_byte != slen)
+                });
+                let Some(m) = m else { return Ok(None) };
+                current = offset(&m, sp.start_byte);
+                bindings.insert("current".to_string(), current);
+            }
+            StepStmt::First { on, args } => {
+                let base = *bindings
+                    .get(on)
+                    .ok_or_else(|| format!("unknown name {on:?} in first()"))?;
+                let mut u: Vec<UnifiedKind> = vec![];
+                for a in args {
+                    for k in kinds_from_cli(a.trim())? {
+                        if !u.contains(&k) {
+                            u.push(k);
+                        }
+                    }
+                }
+                let Some(n) = ts_node_exact(file_root, base.span.start_byte, base.span.end_byte) else {
+                    return Err("first: span not in tree".to_string());
+                };
+                let m = first_preorder_match(language, n, &u)?;
+                let Some(m) = m else {
+                    return Ok(None);
+                };
+                current = m;
+                bindings.insert("current".to_string(), current);
+            }
+            StepStmt::Emit { template } => {
+                has_emit = true;
+                let ap = AfterPipeline {
+                    node: node_root,
+                    current,
+                    bindings: bindings.clone(),
+                };
+                let line = render_template_v2(
+                    path,
+                    source,
+                    language,
+                    &ap,
+                    template,
+                )?;
+                println!("{line}");
+            }
+        }
+    }
+
+    Ok(Some(PipelineRunOutcome {
+        need_default_print: !has_emit,
+        after: Some(AfterPipeline {
+            node: node_root,
+            current,
+            bindings,
+        }),
+    }))
+}
+
+// --- print / template (shared by emit and by bin) ---------------------------
+
+/// Expand ``{name.field}`` and legacy ``{type}`` etc. using [AfterPipeline] (or root-only: pass same node for both).
+pub fn render_template_v2(
+    path: &Path,
+    source: &str,
+    language: Language,
+    ap: &AfterPipeline,
+    template: &str,
+) -> Result<String, String> {
+    // First: dotted placeholders
+    let mut out = String::new();
+    let mut i = 0;
+    let bytes = template.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(end) = find_closing_brace(&template[i + 1..]) {
+                let j = i + 1 + end;
+                let inner = &template[i + 1..i + 1 + end];
+                if inner.contains('.') {
+                    let (a, b) = inner.rsplit_once('.').ok_or("bad {a.b} placeholder")?;
+                    let val = field_of_binding(path, source, language, a, b.trim(), ap)?;
+                    out.push_str(&val);
+                } else {
+                    // pass through for second phase (legacy single token)
+                    out.push('{');
+                    out.push_str(inner);
+                    out.push('}');
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(char::from(bytes[i]));
+        i += 1;
+    }
+    // Legacy: use *current* for the standard set
+    let c = &ap.current;
+    let (sl, sc) = byte_to_line_col(source, c.span.start_byte);
+    let (el, ec) = byte_to_line_col(source, c.span.end_byte);
+    let range = format!("{sl}:{sc}-{el}:{ec}");
+    let start = format!("{sl}:{sc}");
+    let end = format!("{el}:{ec}");
+    let file = path.display().to_string();
+    let kstr = format_kind(c.kind);
+    let lang = language.as_cli_name();
+    let ecnt = span_text(source, c.span.start_byte, c.span.end_byte).escape_default().to_string();
+    let body = c
+        .body
+        .map(|b| {
+            span_text(source, b.start_byte, b.end_byte)
+                .escape_default()
+                .to_string()
+        })
+        .unwrap_or_default();
+    let sb = c.span.start_byte.to_string();
+    let se = c.span.end_byte.to_string();
+    let bsb = c
+        .body
+        .map(|b| b.start_byte.to_string())
+        .unwrap_or_default();
+    let bbe = c.body.map(|b| b.end_byte.to_string()).unwrap_or_default();
+    // also substitute raw binding names: {bname} = escaped content
+    let mut t = out;
+    for (name, m) in &ap.bindings {
+        let content = span_text(source, m.span.start_byte, m.span.end_byte)
+            .escape_default()
+            .to_string();
+        t = t.replace(&format!("{{{name}}}"), &content);
+    }
+    t = t.replace("{node}", &span_text(source, ap.node.span.start_byte, ap.node.span.end_byte).escape_default().to_string());
+    t = t.replace(
+        "{current}",
+        &span_text(source, ap.current.span.start_byte, ap.current.span.end_byte)
+            .escape_default()
+            .to_string(),
+    );
+    Ok(render_template(
+        &t,
+        &file,
+        &kstr,
+        &start,
+        &end,
+        &range,
+        "",
+        &ecnt,
+        &body,
+        lang,
+        &sb,
+        &se,
+        &bsb,
+        &bbe,
+    ))
+}
+
+fn find_closing_brace(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        if c == b'}' {
+            return Some(i);
         }
     }
     None
 }
 
-pub fn parse_steps(steps: &[String]) -> Result<Vec<PipelineStep>, String> {
-    let mut out = Vec::new();
-    for s in steps {
-        let s = s.trim();
-        if s.is_empty() {
-            continue;
-        }
-        if s == "strip" {
-            out.push(PipelineStep::Strip);
-            continue;
-        }
-        let Some((step_kind, rest)) = split_step_prefix(s) else {
-            return Err(format!(
-                "unknown --step {s:?}; see find --help (assign, next:, expand:, has, is, print, strip, ...)"
-            ));
-        };
-        match step_kind {
-            "assign" => {
-                let (name, source) = rest.split_once(':').ok_or_else(|| {
-                    format!("assign expects assign:NAME:SOURCE (or a:...), got {s:?}")
-                })?;
-                if name.is_empty() || source.is_empty() {
-                    return Err(format!("invalid assign step: {s:?}"));
-                }
-                out.push(PipelineStep::Assign {
-                    name: name.to_string(),
-                    source: source.to_string(),
-                });
+fn field_of_binding(
+    path: &Path,
+    source: &str,
+    language: Language,
+    name: &str,
+    field: &str,
+    ap: &AfterPipeline,
+) -> Result<String, String> {
+    let m = *ap
+        .bindings
+        .get(name)
+        .or_else(|| {
+            if name == "node" {
+                Some(&ap.node)
+            } else if name == "current" {
+                Some(&ap.current)
+            } else {
+                None
             }
-            "next" => {
-                let var = rest.trim();
-                if var.is_empty() {
-                    return Err(format!("next expects next:NAME, got {s:?}"));
-                }
-                if var.contains(':') {
-                    return Err(format!("next: variable name must not contain ':', got {s:?}"));
-                }
-                out.push(PipelineStep::Next {
-                    var: var.to_string(),
-                });
-            }
-            "expand" => {
-                let var = rest.trim();
-                if var.is_empty() {
-                    return Err(format!("expand expects expand:NAME, got {s:?}"));
-                }
-                if var.contains(':') {
-                    return Err(format!("expand: variable name must not contain ':', got {s:?}"));
-                }
-                out.push(PipelineStep::Expand {
-                    var: var.to_string(),
-                });
-            }
-            "has" | "is" => {
-                let (var, kind_cli) = rest.split_once(':').ok_or_else(|| {
-                    format!("{step_kind} expects {step_kind}:VAR:KIND (e.g. has:ob:loop:for), got {s:?}")
-                })?;
-                if var.is_empty() || kind_cli.is_empty() {
-                    return Err(format!("invalid {step_kind} step: {s:?}"));
-                }
-                if step_kind == "has" {
-                    out.push(PipelineStep::Has {
-                        var: var.to_string(),
-                        kind_cli: kind_cli.to_string(),
-                    });
-                } else {
-                    out.push(PipelineStep::Is {
-                        var: var.to_string(),
-                        kind_cli: kind_cli.to_string(),
-                    });
-                }
-            }
-            "strip" => {
-                if !rest.is_empty() {
-                    return Err(format!(
-                        "strip must be the word `strip`, or `strip:` / `s:` with nothing after, got {s:?}"
-                    ));
-                }
-                out.push(PipelineStep::Strip);
-            }
-            "print" => {
-                out.push(PipelineStep::Print {
-                    template: rest.to_string(),
-                });
-            }
-            _ => unreachable!(),
-        }
-    }
-    Ok(out)
+        })
+        .ok_or_else(|| format!("unknown node {name} in template"))?;
+    field_string(path, source, language, &m, field)
 }
 
-/// [`UnifiedKind`]s that count as "block-shaped" for `strip`: function, `if`, and all loop forms.
-fn block_shape_kinds() -> Result<Vec<UnifiedKind>, String> {
-    let mut v = kinds_from_cli("function_definition")?;
-    v.extend(kinds_from_cli("branch")?);
-    v.extend(kinds_from_cli("loop")?);
-    Ok(v)
-}
-
-fn region_for_source(m: &MappedNode, from: &str) -> Result<Span, String> {
-    let s = from.trim();
-    match s {
-        "node" | "node_span" | "content" => Ok(m.span),
-        "body" => m
-            .body
-            .ok_or_else(|| "this node has no body field".to_string()),
-        "consequence" => {
-            if m.kind != UnifiedKind::Branch(BranchKind::If) {
-                return Err(
-                    "--assign :consequence is only valid when the current node is branch:if"
-                        .to_string(),
-                );
-            }
-            m.body
-                .ok_or_else(|| "if node has no consequence/body span".to_string())
+fn field_string(
+    path: &Path,
+    source: &str,
+    language: Language,
+    m: &MappedNode,
+    field: &str,
+) -> Result<String, String> {
+    let (sl, sc) = byte_to_line_col(source, m.span.start_byte);
+    let (el, ec) = byte_to_line_col(source, m.span.end_byte);
+    let range = format!("{sl}:{sc}-{el}:{ec}");
+    let start = format!("{sl}:{sc}");
+    let end = format!("{el}:{ec}");
+    match field {
+        "type" => Ok(format_kind(m.kind)),
+        "start" => Ok(start),
+        "end" => Ok(end),
+        "range" => Ok(range),
+        "content" => Ok(span_text(source, m.span.start_byte, m.span.end_byte)
+            .escape_default()
+            .to_string()),
+        "body" => {
+            let t = m
+                .body
+                .map(|b| {
+                    span_text(source, b.start_byte, b.end_byte)
+                        .escape_default()
+                        .to_string()
+                })
+                .unwrap_or_default();
+            Ok(t)
         }
-        _ => Err(format!(
-            "unknown assign source {from:?}; use node, node_span, content, body, or consequence"
-        )),
+        "language" => Ok(language.as_cli_name().to_string()),
+        "file" => Ok(path.display().to_string()),
+        "start_byte" => Ok(m.span.start_byte.to_string()),
+        "end_byte" => Ok(m.span.end_byte.to_string()),
+        "body_start_byte" | "body_start" => {
+            if let Some(b) = m.body {
+                Ok(b.start_byte.to_string())
+            } else {
+                Ok(String::new())
+            }
+        }
+        "body_end_byte" | "body_end" => {
+            if let Some(b) = m.body {
+                Ok(b.end_byte.to_string())
+            } else {
+                Ok(String::new())
+            }
+        }
+        _ => Err(format!("unknown field {field} on node; use file,type,start,end,range,content,body,language,...")),
     }
 }
 
-fn offset_mapped_node(m: &MappedNode, off: usize) -> MappedNode {
+// --- internal ---------------------------------------------------------------
+
+fn default_bindings(root: MappedNode) -> HashMap<String, MappedNode> {
+    let mut b = HashMap::new();
+    b.insert("node".to_string(), root);
+    b.insert("current".to_string(), root);
+    b
+}
+
+fn offset(m: &MappedNode, off: usize) -> MappedNode {
     let sh = |sp: Span| Span {
         start_byte: sp.start_byte + off,
         end_byte: sp.end_byte + off,
@@ -192,244 +444,266 @@ fn offset_mapped_node(m: &MappedNode, off: usize) -> MappedNode {
     }
 }
 
-/// First tree-sitter subtree in preorder whose byte range exactly matches `start..end`.
-fn ts_node_exact_range<'a>(node: Node<'a>, start: usize, end: usize) -> Option<Node<'a>> {
+fn ts_node_exact<'a>(node: Node<'a>, start: usize, end: usize) -> Option<Node<'a>> {
     let r = node.range();
     if r.start_byte == start && r.end_byte == end {
         return Some(node);
     }
     let mut c = node.walk();
     for child in node.children(&mut c) {
-        if let Some(n) = ts_node_exact_range(child, start, end) {
+        if let Some(n) = ts_node_exact(child, start, end) {
             return Some(n);
         }
     }
     None
 }
 
-/// Returns `Ok(None)` if this root match does not pass the pipeline (filter out).
-/// Returns `Err` on invalid --step usage for the current node.
-pub fn run_unified_pipeline(
-    path: &Path,
-    source: &str,
+/// First preorder node (including n) with unified kind in `set`
+fn first_preorder_match(
     language: Language,
-    root: &MappedNode,
-    steps: &[PipelineStep],
-) -> Result<Option<PipelineRunOutcome>, String> {
-    let mut current = *root;
-    let mut bindings: HashMap<String, Span> = HashMap::new();
-    let mut has_print = false;
+    n: Node<'_>,
+    set: &[UnifiedKind],
+) -> Result<Option<MappedNode>, String> {
+    if let Some(m) = map_unified_node(language, &n) {
+        if set.contains(&m.kind) {
+            return Ok(Some(m));
+        }
+    }
+    let mut c = n.walk();
+    for child in n.children(&mut c) {
+        if let Some(m) = first_preorder_match(language, child, set)? {
+            return Ok(Some(m));
+        }
+    }
+    Ok(None)
+}
 
-    for step in steps {
-        match step {
-            PipelineStep::Assign { name, source: src } => {
-                let sp = match region_for_source(&current, src) {
-                    Ok(sp) if sp.start_byte < sp.end_byte => sp,
-                    Ok(_) => return Ok(None),
-                    Err(e) => return Err(e),
-                };
-                bindings.insert(name.clone(), sp);
+/// First tree-sitter node in DFS preorder (including `n`) that maps to a [MappedNode].
+fn first_unified_mapped_in_subtree(language: Language, n: Node<'_>) -> Option<MappedNode> {
+    if let Some(m) = map_unified_node(language, &n) {
+        return Some(m);
+    }
+    let mut c = n.walk();
+    for ch in n.children(&mut c) {
+        if let Some(m) = first_unified_mapped_in_subtree(language, ch) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+/// `NoMatch` means: skip this hit, not a file-level error.
+enum BodyAssign {
+    Ok(MappedNode),
+    NoMatch,
+}
+
+fn assign_body_or_consequence(
+    language: Language,
+    file_root: Node<'_>,
+    base: &MappedNode,
+    which: RelBody,
+) -> BodyAssign {
+    let span = match which {
+        RelBody::Body => {
+            if let Some(b) = base.body {
+                b
+            } else {
+                return BodyAssign::NoMatch;
             }
-            PipelineStep::Next { var } => {
-                let tree = parse(language, source)
-                    .map_err(|e: tree_lang::ParseError| format!("next: parse file: {e}"))?;
-                let root = tree.root_node();
-                let sp = current.span;
-                let Some(ts) = ts_node_exact_range(root, sp.start_byte, sp.end_byte) else {
-                    return Err("next: current span not found in tree-sitter tree".to_string());
-                };
-                let mut sib = ts.next_named_sibling();
-                let found = 'm: {
-                    while let Some(n) = sib {
-                        if let Some(m) = map_unified_node(language, &n) {
-                            break 'm Some(m);
-                        }
-                        sib = n.next_named_sibling();
-                    }
-                    None
-                };
-                let Some(m) = found else {
-                    return Ok(None);
-                };
-                bindings.insert(var.clone(), m.span);
-                current = m;
+        }
+        RelBody::Consequence => {
+            if base.kind != UnifiedKind::Branch(BranchKind::If) {
+                return BodyAssign::NoMatch;
             }
-            PipelineStep::Expand { var } => {
-                let b = current
-                    .body
-                    .ok_or_else(|| "expand: current unified node has no `body` field".to_string())?;
-                if b.start_byte >= b.end_byte {
-                    return Ok(None);
+            if let Some(c) = base.body {
+                c
+            } else {
+                return BodyAssign::NoMatch;
+            }
+        }
+    };
+    if span.start_byte >= span.end_byte {
+        return BodyAssign::NoMatch;
+    }
+    let Some(n) = ts_node_exact(file_root, span.start_byte, span.end_byte) else {
+        // Should not happen if `base` and `file_root` are consistent; treat as skip.
+        return BodyAssign::NoMatch;
+    };
+    if let Some(m) = map_unified_node(language, &n) {
+        return BodyAssign::Ok(m);
+    }
+    if let Some(inner) = first_unified_mapped_in_subtree(language, n) {
+        return BodyAssign::Ok(MappedNode {
+            span,
+            kind: inner.kind,
+            body: None,
+        });
+    }
+    BodyAssign::NoMatch
+}
+
+fn parse_one_step(s: &str) -> Result<StepStmt, String> {
+    let s = s.trim();
+    if s.starts_with("emit:") {
+        return Ok(StepStmt::Emit {
+            template: s[5..].to_string(),
+        });
+    }
+    // assign: name=node|current|body|consequence|x.body|x.consequence
+    if let Some(eq) = s.find('=') {
+        let name = s[..eq].trim();
+        let rhs = s[eq + 1..].trim();
+        if name.is_empty() {
+            return Err("assign: empty name".to_string());
+        }
+        let source = if let Some((on, field)) = rhs.rsplit_once('.') {
+            let on = on.trim();
+            let field = field.trim();
+            if on.is_empty() {
+                return Err("assign: empty name before . in x.body / x.consequence".to_string());
+            }
+            let part = match field {
+                "body" => RelBody::Body,
+                "consequence" => RelBody::Consequence,
+                f => {
+                    return Err(format!(
+                        "assign: after . use `body` or `consequence`, not {f:?} (in {rhs:?})"
+                    ));
                 }
-                bindings.insert(var.clone(), b);
-                let slice = source
-                    .get(b.start_byte..b.end_byte)
-                    .ok_or_else(|| "expand: body out of range".to_string())?;
-                let body_tree = parse(language, slice)
-                    .map_err(|e: tree_lang::ParseError| format!("expand: parse body: {e}"))?;
-                let br = body_tree.root_node();
-                if let Some(m) = map_unified_node(language, &br) {
-                    if m.span.start_byte == 0 && m.span.end_byte == slice.len() {
-                        current = offset_mapped_node(&m, b.start_byte);
-                    } else {
-                        current = MappedNode {
-                            kind: current.kind,
-                            span: b,
-                            body: None,
-                        };
-                    }
-                } else {
-                    current = MappedNode {
-                        kind: current.kind,
-                        span: b,
-                        body: None,
-                    };
+            };
+            AssignSource::OnBinding {
+                on: on.to_string(),
+                part,
+            }
+        } else {
+            match rhs {
+                "node" => AssignSource::Node,
+                "current" => AssignSource::Current,
+                "body" => AssignSource::Relative(RelBody::Body),
+                "consequence" => AssignSource::Relative(RelBody::Consequence),
+                o => {
+                    return Err(format!(
+                        "assign: use node, current, body, consequence, or x.body / x.consequence, not {o:?}"
+                    ));
                 }
             }
-            PipelineStep::Has { var, kind_cli } => {
-                let sp = *bindings
-                    .get(var)
-                    .ok_or_else(|| format!("--step has: unknown variable {var:?}"))?;
-                if sp.start_byte >= sp.end_byte {
-                    return Ok(None);
-                }
-                let slice = source
-                    .get(sp.start_byte..sp.end_byte)
-                    .ok_or_else(|| "body span out of range".to_string())?;
-                if slice.is_empty() {
-                    return Ok(None);
-                }
-                let target_kinds = kinds_from_cli(kind_cli.as_str())?;
-                let found = find_unified_kinds(language, slice, &target_kinds);
-                // Re-parsing a *full* loop node (assign …:node) makes that loop the tree root, so
-                // the first DFS match would be the same loop again. Skip matches that cover the
-                // entire sub-slice; keep looking for a strictly inner loop. (Assign …:body instead
-                // of node if you only need “inside the braces” without this ambiguity.)
-                let m = found.ok().and_then(|v| {
-                    let slen = slice.len();
-                    v.into_iter()
-                        .find(|m| m.span.start_byte != 0 || m.span.end_byte != slen)
-                });
-                let Some(m) = m else {
-                    return Ok(None);
-                };
-                current = offset_mapped_node(&m, sp.start_byte);
-            }
-            PipelineStep::Is { var, kind_cli } => {
-                let sp = *bindings
-                    .get(var)
-                    .ok_or_else(|| format!("--step is: unknown variable {var:?}"))?;
-                if sp.start_byte >= sp.end_byte {
-                    return Ok(None);
-                }
-                let slice = source
-                    .get(sp.start_byte..sp.end_byte)
-                    .ok_or_else(|| "is: span out of range".to_string())?;
-                if slice.is_empty() {
-                    return Ok(None);
-                }
-                let target_kinds = kinds_from_cli(kind_cli.as_str())?;
-                let Some(m) = match_root_as_unified(language, slice, &target_kinds) else {
-                    return Ok(None);
-                };
-                current = offset_mapped_node(&m, sp.start_byte);
-            }
-            PipelineStep::Strip => {
-                let sp = current.span;
-                let slice = source
-                    .get(sp.start_byte..sp.end_byte)
-                    .ok_or_else(|| "strip: current span out of range".to_string())?;
-                if slice.is_empty() {
-                    return Ok(None);
-                }
-                let kinds = block_shape_kinds()?;
-                let v = find_unified_kinds(language, slice, &kinds).map_err(|e: tree_lang::ParseError| {
-                    format!("strip: parse in span: {e}")
-                })?;
-                let m = v
-                    .into_iter()
-                    .min_by_key(|m| (m.span.start_byte, m.span.end_byte));
-                let Some(m) = m else {
-                    return Ok(None);
-                };
-                current = offset_mapped_node(&m, sp.start_byte);
-            }
-            PipelineStep::Print { template } => {
-                has_print = true;
-                let line = render_for_pipeline(
-                    path,
-                    source,
-                    language,
-                    &current,
-                    &bindings,
-                    template,
-                )?;
-                println!("{line}");
+        };
+        return Ok(StepStmt::Assign {
+            name: name.to_string(),
+            source,
+        });
+    }
+    let mut best: Option<(usize, &'static str)> = None;
+    for (pat, tag) in [(".is(", "is"), (".has(", "has"), (".first(", "first")] {
+        if let Some(p) = s.find(pat) {
+            if best.map_or(true, |(bp, _)| p < bp) {
+                best = Some((p, tag));
             }
         }
     }
-
-    Ok(Some(PipelineRunOutcome {
-        need_default_print: !has_print,
-    }))
+    if let Some((p, tag)) = best {
+        let on = s[..p].trim();
+        if on.is_empty() {
+            return Err(format!("bad method call: {s:?}"));
+        }
+        let pat = match tag {
+            "is" => ".is(",
+            "has" => ".has(",
+            "first" => ".first(",
+            _ => unreachable!(),
+        };
+        let from = p + pat.len() - 1; // index of '('
+        if s.as_bytes().get(from) != Some(&b'(') {
+            return Err(format!("expected '(' after {tag} in {s:?}"));
+        }
+        let inner = extract_parens(s, from)?;
+        return match tag {
+            "is" => {
+                if inner.is_empty() {
+                    return Err("is() needs a kind string".to_string());
+                }
+                Ok(StepStmt::Is {
+                    on: on.to_string(),
+                    kind: inner.to_string(),
+                })
+            }
+            "has" => {
+                if inner.is_empty() {
+                    return Err("has() needs a kind string".to_string());
+                }
+                Ok(StepStmt::Has {
+                    on: on.to_string(),
+                    kind: inner.to_string(),
+                })
+            }
+            "first" => {
+                let args = split_comma_list(inner);
+                if args.is_empty() {
+                    return Err("first() needs at least one kind".to_string());
+                }
+                Ok(StepStmt::First {
+                    on: on.to_string(),
+                    args,
+                })
+            }
+            _ => unreachable!(),
+        };
+    }
+    Err(format!(
+        "unrecognized --step: {s:?}. Try name=node, name=x.body, x.is(kinds), x.has(kinds), x.first(a,b), emit:..."
+    ))
 }
 
-fn render_for_pipeline(
-    path: &Path,
-    source: &str,
-    language: Language,
-    current: &MappedNode,
-    bindings: &HashMap<String, Span>,
-    template: &str,
-) -> Result<String, String> {
-    let (sl, sc) = byte_to_line_col(source, current.span.start_byte);
-    let (el, ec) = byte_to_line_col(source, current.span.end_byte);
-    let range = format!("{sl}:{sc}-{el}:{ec}");
-    let start = format!("{sl}:{sc}");
-    let end = format!("{el}:{ec}");
-    let file = path.display().to_string();
-    let kstr = format_kind(current.kind);
-    let lang = language.as_cli_name();
-    let node_text = span_text(source, current.span.start_byte, current.span.end_byte);
-    let escaped_content = node_text.escape_default().to_string();
-    let escaped_body = current
-        .body
-        .map(|b| {
-            span_text(source, b.start_byte, b.end_byte)
-                .escape_default()
-                .to_string()
-        })
-        .unwrap_or_default();
-    let sb = current.span.start_byte.to_string();
-    let se = current.span.end_byte.to_string();
-    let bsb = current
-        .body
-        .map(|b| b.start_byte.to_string())
-        .unwrap_or_default();
-    let bbe = current
-        .body
-        .map(|b| b.end_byte.to_string())
-        .unwrap_or_default();
-
-    let mut out = template.to_string();
-    for (k, sp) in bindings {
-        let raw = span_text(source, sp.start_byte, sp.end_byte);
-        out = out.replace(&format!("{{{k}}}"), &raw);
+/// s[from] is '('; return string inside the matching paren
+fn extract_parens(s: &str, from: usize) -> Result<&str, String> {
+    let b = s.as_bytes();
+    if b.get(from) != Some(&b'(') {
+        return Err("expected (".to_string());
     }
-    Ok(render_template(
-        &out,
-        &file,
-        &kstr,
-        &start,
-        &end,
-        &range,
-        "",
-        &escaped_content,
-        &escaped_body,
-        lang,
-        &sb,
-        &se,
-        &bsb,
-        &bbe,
-    ))
+    let mut d = 0i32;
+    for i in from..b.len() {
+        match b[i] {
+            b'(' => d += 1,
+            b')' => {
+                d -= 1;
+                if d == 0 {
+                    return std::str::from_utf8(&b[from + 1..i])
+                        .map_err(|_| "utf8".to_string())
+                        .map(|r| {
+                            r // inner
+                        });
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("unclosed (".to_string())
+}
+
+/// Split on commas at paren depth 0
+fn split_comma_list(s: &str) -> Vec<String> {
+    let b = s.as_bytes();
+    let mut d = 0i32;
+    let mut start = 0;
+    let mut out = Vec::new();
+    for i in 0..=b.len() {
+        let c = b.get(i).map(|&x| x);
+        if let Some(x) = c {
+            match x {
+                b'(' | b'[' | b'{' => d += 1,
+                b')' | b']' | b'}' => d -= 1,
+                b',' if d == 0 => {
+                    out.push(s[start..i].trim().to_string());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        } else {
+            if start < s.len() {
+                out.push(s[start..i].trim().to_string());
+            }
+        }
+    }
+    out.into_iter().filter(|s| !s.is_empty()).collect()
 }

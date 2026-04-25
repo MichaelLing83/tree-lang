@@ -42,7 +42,7 @@ fn dfs_preorder_accepts_path_and_runs_with_step() {
             "-l",
             "python",
             "--step",
-            "p:{type}",
+            "emit:{type}",
         ])
         .output()
         .expect("run tree-lang dfs_preorder");
@@ -79,7 +79,7 @@ fn dfs_preorder_and_dfs_postorder_line_order_differs_for_py_fixture() {
                 "-l",
                 "python",
                 "--step",
-                "p:{type}",
+                "emit:{type}",
             ])
             .output()
             .expect(sub);

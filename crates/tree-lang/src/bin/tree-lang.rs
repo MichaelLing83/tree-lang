@@ -20,37 +20,33 @@ const STEP_ARG_HELP_SHORT: &str =
     "Pipeline step; repeat with --step (order matters). Use --help for full syntax.";
 
 /// Long help for `--step` (shared by `find` and all traverse subcommands).
-const STEP_ARG_LONG_HELP: &str = r"Pipeline steps — repeat `--step`; order matters.
+const STEP_ARG_LONG_HELP: &str = r"Pipeline steps — repeat `--step`; order matters (node-centric).
 
-  assign:NAME:SOURCE    a:NAME:SOURCE
-      Bind a span from the current node. SOURCE is one of: node, content, body;
-      for branch:if nodes, consequence is also allowed.
+  name=node | current | body | consequence | x.body | x.consequence
+      `=node` is the per-hit find/traverse root; `=current` is the pipeline focus. `=body` / `=consequence`
+      are relative to **current**; `=x.body` / `=x.consequence` use another binding `x` (e.g. `b=n.body`).
+      Does not move `current` by itself; later steps use the binding.
 
-  has:VAR:KIND         h:VAR:KIND
-      First unified KIND inside span VAR; current becomes that node.
+  x.is(KIND)          KIND uses the same grammar as -k. Fails the pipeline if `x` is
+      not one of those kinds. Sets `current` to `x` on success.
 
-  is:VAR:KIND          i:VAR:KIND
-      Span VAR must re-parse as a unified root of KIND covering the whole text
-      (structural match), not substring containment.
+  x.has(KIND)         Like the old has: first strict inner unified hit in `x`'s span
+      (skips the full-span root). Sets `current` to that node.
 
-  print:TEMPLATE       p:TEMPLATE
-      One line: {name} bindings, then the same placeholders as --print-format.
+  x.first(A,B,…)     Union of -k kind lists; first DFS-preorder node under `x` (including
+      `x` if it matches) whose kind is in that set. Sets `current` on success.
 
-  strip                strip:   s:
-      No arguments. Replace current with the leftmost loop, branch (if/switch/match), or
-      function_definition in the current span (trim leading/trailing non-block syntax).
+  emit:TEMPLATE        One line of output mid-pipeline; `TEMPLATE` is like `--print-format`
+      (dotted {x.y} for bindings plus legacy {type} etc. based on `current`).
 
-  next:NAME
-      Next named sibling that is a unified node; bind to NAME and select it.
-
-  expand:NAME
-      Bind current's body span to NAME; re-parse the body and move current there.
+`node` and `current` are always in scope. `--print` / `--print-format` after all steps
+use the final `current` (dotted `name.field` bindings from after-pipeline state).
 
 Restriction (subcommand find only): --step cannot be used with function_definition
 filters (--name, --param-*, --return-type, --param-name-at, --param-type-at).
 
 Example:
-  --step assign:ob:body --step has:ob:loop:for --step 'print:{file} {type}'";
+  --step 'n=node' --step 'b=n.body' --step 'b.has(loop)' --step 'emit:{b.type}'";
 
 #[derive(Parser)]
 #[command(name = "tree-lang", version, about = "Unified syntax search over source trees")]
@@ -204,7 +200,7 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     }
 
-    let pipeline_steps: Option<Vec<pipeline::PipelineStep>> = if args.step.is_empty() {
+    let program: Option<pipeline::StepProgram> = if args.step.is_empty() {
         None
     } else {
         match pipeline::parse_steps(&args.step) {
@@ -298,7 +294,7 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
         );
         return std::process::ExitCode::from(2);
     }
-    if pipeline_steps.is_some() && uses_function_filters {
+    if program.is_some() && uses_function_filters {
         eprintln!("error: --step pipeline is not supported with function_definition filters (yet)");
         return std::process::ExitCode::from(2);
     }
@@ -355,7 +351,7 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
             &indexed_param_type,
             print_fields.as_deref(),
             args.print_format.as_deref(),
-            pipeline_steps.as_deref(),
+            program.as_ref(),
             &mut had_error,
         );
     }
@@ -396,7 +392,7 @@ fn run_find(args: FindArgs) -> std::process::ExitCode {
             &indexed_param_type,
             print_fields.as_deref(),
             args.print_format.as_deref(),
-            pipeline_steps.as_deref(),
+            program.as_ref(),
             &mut had_error,
         );
     }
@@ -429,7 +425,7 @@ fn run_traverse(args: TraverseArgs, order: TreeTraversal) -> std::process::ExitC
         return std::process::ExitCode::from(2);
     }
 
-    let pipeline_steps: Option<Vec<pipeline::PipelineStep>> = if args.step.is_empty() {
+    let program: Option<pipeline::StepProgram> = if args.step.is_empty() {
         None
     } else {
         match pipeline::parse_steps(&args.step) {
@@ -503,7 +499,7 @@ fn run_traverse(args: TraverseArgs, order: TreeTraversal) -> std::process::ExitC
             order,
             print_fields.as_deref(),
             args.print_format.as_deref(),
-            pipeline_steps.as_deref(),
+            program.as_ref(),
             &mut had_error,
         );
     }
@@ -537,7 +533,7 @@ fn run_traverse(args: TraverseArgs, order: TreeTraversal) -> std::process::ExitC
             order,
             print_fields.as_deref(),
             args.print_format.as_deref(),
-            pipeline_steps.as_deref(),
+            program.as_ref(),
             &mut had_error,
         );
     }
@@ -556,7 +552,7 @@ fn process_traverse_source(
     order: TreeTraversal,
     print_fields: Option<&[PrintField]>,
     print_format: Option<&str>,
-    pipeline: Option<&[pipeline::PipelineStep]>,
+    pipeline: Option<&pipeline::StepProgram>,
     had_error: &mut bool,
 ) {
     let tree = match parse(language, source) {
@@ -569,10 +565,20 @@ fn process_traverse_source(
     };
     for_each_subtree_node(tree.root_node(), order, |node| {
         if let Some(m) = map_unified_node(language, &node) {
-            if let Some(steps) = pipeline {
-                match pipeline::run_unified_pipeline(path, source, language, &m, steps) {
+            if let Some(prog) = pipeline {
+                match pipeline::run_unified_pipeline(path, source, language, &m, prog) {
                     Ok(Some(out)) if out.need_default_print => {
-                        print_unified(path, source, language, &m, print_fields, print_format);
+                        if let Some(ap) = &out.after {
+                            print_unified_after(
+                                path,
+                                source,
+                                language,
+                                ap,
+                                print_fields,
+                                print_format,
+                                had_error,
+                            );
+                        }
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => {}
@@ -603,7 +609,7 @@ fn process_source(
     indexed_param_type: &[IndexedRegex],
     print_fields: Option<&[PrintField]>,
     print_format: Option<&str>,
-    pipeline: Option<&[pipeline::PipelineStep]>,
+    pipeline: Option<&pipeline::StepProgram>,
     had_error: &mut bool,
 ) {
     if uses_function_filters {
@@ -669,11 +675,21 @@ fn process_source(
                 return;
             }
         };
-        if let Some(steps) = pipeline {
+        if let Some(prog) = pipeline {
             for m in &matches {
-                match pipeline::run_unified_pipeline(path, source, language, m, steps) {
+                match pipeline::run_unified_pipeline(path, source, language, m, prog) {
                     Ok(Some(out)) if out.need_default_print => {
-                        print_unified(path, source, language, m, print_fields, print_format);
+                        if let Some(ap) = &out.after {
+                            print_unified_after(
+                                path,
+                                source,
+                                language,
+                                ap,
+                                print_fields,
+                                print_format,
+                                had_error,
+                            );
+                        }
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => {}
@@ -731,6 +747,35 @@ fn print_unified(
         &body_end_byte,
         print_fields,
         print_format,
+    );
+}
+
+fn print_unified_after(
+    path: &Path,
+    source: &str,
+    language: Language,
+    ap: &pipeline::AfterPipeline,
+    print_fields: Option<&[PrintField]>,
+    print_format: Option<&str>,
+    had_error: &mut bool,
+) {
+    if let Some(t) = print_format {
+        match pipeline::render_template_v2(path, source, language, ap, t) {
+            Ok(line) => println!("{line}"),
+            Err(e) => {
+                eprintln!("{}: {e}", path.display());
+                *had_error = true;
+            }
+        }
+        return;
+    }
+    print_unified(
+        path,
+        source,
+        language,
+        &ap.current,
+        print_fields,
+        None,
     );
 }
 

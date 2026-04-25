@@ -198,14 +198,14 @@ fn find_supports_pipeline_step() {
             c_file.to_str().expect("utf8 path"),
             "-l",
             "c",
-            "-k",
+        "-k",
             "loop",
             "--step",
-            "assign:ob:body",
+            "ob=node",
             "--step",
-            "has:ob:loop",
-            "--step",
-            "print:pipeline-ok",
+            "ob.has(loop)",
+        "--step",
+        "emit:pipeline-ok",
         ])
         .output()
         .expect("run tree-lang find with --step pipeline");
@@ -232,11 +232,11 @@ fn find_supports_pipeline_is_step() {
         "-k",
         "loop",
         "--step",
-        "assign:x:node",
+        "x=node",
         "--step",
-        "is:x:loop",
+        "x.is(loop)",
         "--step",
-        "print:IS-OK",
+        "emit:IS-OK",
     ]);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
@@ -256,7 +256,7 @@ fn find_supports_pipeline_is_step() {
 }
 
 #[test]
-fn find_supports_pipeline_strip_step() {
+fn find_supports_pipeline_first_step() {
     let mut cmd = bin_cmd();
     cmd.args([
         "find",
@@ -266,11 +266,11 @@ fn find_supports_pipeline_strip_step() {
         "-k",
         "function_definition",
         "--step",
-        "assign:b:body",
+        "b=body",
         "--step",
-        "strip",
+        "b.first(loop)",
         "--step",
-        "print:STRIP-OK",
+        "emit:STRIP-OK",
     ]);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
@@ -290,7 +290,7 @@ fn find_supports_pipeline_strip_step() {
 }
 
 #[test]
-fn find_supports_pipeline_next_step() {
+fn find_supports_pipeline_node_emit_per_match() {
     let mut cmd = bin_cmd();
     cmd.args([
         "find",
@@ -300,9 +300,11 @@ fn find_supports_pipeline_next_step() {
         "-k",
         "function_definition",
         "--step",
-        "next:n",
+        "n=node",
         "--step",
-        "print:NEXT-OK",
+        "n.is(function_definition)",
+        "--step",
+        "emit:PER-MATCH-OK",
     ]);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
@@ -319,8 +321,8 @@ fn find_supports_pipeline_next_step() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
-        stdout.lines().filter(|l| l.contains("NEXT-OK")).count(),
-        1,
+        stdout.lines().filter(|l| l.contains("PER-MATCH-OK")).count(),
+        2,
         "stdout: {stdout}"
     );
 }
@@ -334,11 +336,11 @@ fn find_supports_pipeline_expand_step() {
         "-l",
         "rust",
         "-k",
-        "loop",
+        "function_definition",
         "--step",
-        "expand:inner",
+        "inner=body",
         "--step",
-        "print:EXPAND-OK",
+        "emit:EXPAND-OK",
     ]);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
@@ -348,7 +350,7 @@ fn find_supports_pipeline_expand_step() {
     {
         let stdin = child.stdin.as_mut().expect("stdin available");
         stdin
-            .write_all(b"for _ in 0..1 { let _x = 0; }\n")
+            .write_all(b"fn f() { for _ in 0..1 { for _ in 0..1 { } } }\n")
             .expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
