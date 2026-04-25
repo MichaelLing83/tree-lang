@@ -290,6 +290,40 @@ fn find_supports_pipeline_first_step() {
 }
 
 #[test]
+fn find_supports_assigning_first_result() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-l",
+        "rust",
+        "-k",
+        "function_definition",
+        "--step",
+        "b=body",
+        "--step",
+        "c1=b.first(function_definition, branch, loop)",
+        "--print-format",
+        "{c1.type}:{type}",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"fn f() { if true { for _ in 0..1 {} } }\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Branch(If):Branch(If)"), "stdout: {stdout}");
+}
+
+#[test]
 fn find_supports_pipeline_node_emit_per_match() {
     let mut cmd = bin_cmd();
     cmd.args([

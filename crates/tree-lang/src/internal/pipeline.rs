@@ -12,6 +12,7 @@
 //! - ``x.first(a,b,…)`` — each argument is a ``-k`` kind spec; their union is the set of ``UnifiedKind``;
 //!   DFS (preorder) in the file tree on ``x``'s span, *including* ``x`` if it matches. Sets ``current`` to
 //!   the first hit.
+//! - ``name=x.first(a,b,…)`` — same search as above, but also stores the result under ``name``.
 //! - ``emit:…`` — one line, same template rules as ``--print-format`` (dotted and legacy).
 //!
 //! Bindings: ``node`` and ``current`` are always in scope. ``node`` = per-hit root (immutable).
@@ -49,6 +50,11 @@ enum StepStmt {
     Is { on: String, kind: String },
     Has { on: String, kind: String },
     First { on: String, args: Vec<String> },
+    AssignFirst {
+        name: String,
+        on: String,
+        args: Vec<String>,
+    },
     Emit { template: String },
 }
 
@@ -191,26 +197,21 @@ pub fn run_unified_pipeline(
                 bindings.insert("current".to_string(), current);
             }
             StepStmt::First { on, args } => {
-                let base = *bindings
-                    .get(on)
-                    .ok_or_else(|| format!("unknown name {on:?} in first()"))?;
-                let mut u: Vec<UnifiedKind> = vec![];
-                for a in args {
-                    for k in kinds_from_cli(a.trim())? {
-                        if !u.contains(&k) {
-                            u.push(k);
-                        }
-                    }
-                }
-                let Some(n) = ts_node_exact(file_root, base.span.start_byte, base.span.end_byte) else {
-                    return Err("first: span not in tree".to_string());
-                };
-                let m = first_preorder_match(language, n, &u)?;
+                let m = run_first(language, file_root, &bindings, on, args)?;
                 let Some(m) = m else {
                     return Ok(None);
                 };
                 current = m;
                 bindings.insert("current".to_string(), current);
+            }
+            StepStmt::AssignFirst { name, on, args } => {
+                let m = run_first(language, file_root, &bindings, on, args)?;
+                let Some(m) = m else {
+                    return Ok(None);
+                };
+                current = m;
+                bindings.insert("current".to_string(), current);
+                bindings.insert(name.clone(), m);
             }
             StepStmt::Emit { template } => {
                 has_emit = true;
@@ -478,6 +479,30 @@ fn first_preorder_match(
     Ok(None)
 }
 
+fn run_first(
+    language: Language,
+    file_root: Node<'_>,
+    bindings: &HashMap<String, MappedNode>,
+    on: &str,
+    args: &[String],
+) -> Result<Option<MappedNode>, String> {
+    let base = *bindings
+        .get(on)
+        .ok_or_else(|| format!("unknown name {on:?} in first()"))?;
+    let mut kinds: Vec<UnifiedKind> = vec![];
+    for a in args {
+        for k in kinds_from_cli(a.trim())? {
+            if !kinds.contains(&k) {
+                kinds.push(k);
+            }
+        }
+    }
+    let Some(n) = ts_node_exact(file_root, base.span.start_byte, base.span.end_byte) else {
+        return Err("first: span not in tree".to_string());
+    };
+    first_preorder_match(language, n, &kinds)
+}
+
 /// First tree-sitter node in DFS preorder (including `n`) that maps to a [MappedNode].
 fn first_unified_mapped_in_subtree(language: Language, n: Node<'_>) -> Option<MappedNode> {
     if let Some(m) = map_unified_node(language, &n) {
@@ -556,6 +581,13 @@ fn parse_one_step(s: &str) -> Result<StepStmt, String> {
         let rhs = s[eq + 1..].trim();
         if name.is_empty() {
             return Err("assign: empty name".to_string());
+        }
+        if let Some((on, args)) = parse_first_call(rhs)? {
+            return Ok(StepStmt::AssignFirst {
+                name: name.to_string(),
+                on,
+                args,
+            });
         }
         let source = if let Some((on, field)) = rhs.rsplit_once('.') {
             let on = on.trim();
@@ -651,8 +683,28 @@ fn parse_one_step(s: &str) -> Result<StepStmt, String> {
         };
     }
     Err(format!(
-        "unrecognized --step: {s:?}. Try name=node, name=x.body, x.is(kinds), x.has(kinds), x.first(a,b), emit:..."
+        "unrecognized --step: {s:?}. Try name=node, name=x.body, name=x.first(a,b), x.is(kinds), x.has(kinds), x.first(a,b), emit:..."
     ))
+}
+
+fn parse_first_call(s: &str) -> Result<Option<(String, Vec<String>)>, String> {
+    let Some(p) = s.find(".first(") else {
+        return Ok(None);
+    };
+    let on = s[..p].trim();
+    if on.is_empty() {
+        return Err(format!("bad first() assignment: {s:?}"));
+    }
+    let from = p + ".first(".len() - 1;
+    let inner = extract_parens(s, from)?;
+    if s[from + inner.len() + 2..].trim().is_empty() {
+        let args = split_comma_list(inner);
+        if args.is_empty() {
+            return Err("first() needs at least one kind".to_string());
+        }
+        return Ok(Some((on.to_string(), args)));
+    }
+    Err(format!("unexpected text after first() in {s:?}"))
 }
 
 /// s[from] is '('; return string inside the matching paren
