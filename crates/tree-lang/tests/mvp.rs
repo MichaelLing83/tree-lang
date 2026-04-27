@@ -1,4 +1,6 @@
-use tree_lang::{extract_unified, parse, BranchKind, Language, LoopKind, UnifiedKind};
+use tree_lang::{
+    extract_unified, parse, BranchClauseKind, BranchKind, Language, LoopKind, UnifiedKind,
+};
 
 fn kinds_sample(lang: Language, source: &str) -> Vec<UnifiedKind> {
     let tree = parse(lang, source).expect("parse");
@@ -29,6 +31,8 @@ def f():
             UnifiedKind::Loop(LoopKind::For),
             UnifiedKind::Loop(LoopKind::While),
             UnifiedKind::Branch(BranchKind::If),
+            UnifiedKind::BranchClause(BranchClauseKind::Then),
+            UnifiedKind::BranchClause(BranchClauseKind::Else),
         ]
     );
 }
@@ -52,6 +56,8 @@ fn main() {
             UnifiedKind::Loop(LoopKind::While),
             UnifiedKind::Loop(LoopKind::Infinite),
             UnifiedKind::Branch(BranchKind::If),
+            UnifiedKind::BranchClause(BranchClauseKind::Then),
+            UnifiedKind::BranchClause(BranchClauseKind::Else),
         ]
     );
 }
@@ -79,6 +85,8 @@ class T {
             UnifiedKind::Loop(LoopKind::While),
             UnifiedKind::Loop(LoopKind::DoWhile),
             UnifiedKind::Branch(BranchKind::If),
+            UnifiedKind::BranchClause(BranchClauseKind::Then),
+            UnifiedKind::BranchClause(BranchClauseKind::Else),
         ]
     );
 }
@@ -102,6 +110,8 @@ void f() {
             UnifiedKind::Loop(LoopKind::While),
             UnifiedKind::Loop(LoopKind::DoWhile),
             UnifiedKind::Branch(BranchKind::If),
+            UnifiedKind::BranchClause(BranchClauseKind::Then),
+            UnifiedKind::BranchClause(BranchClauseKind::Else),
         ]
     );
 }
@@ -158,6 +168,25 @@ void f() {
             UnifiedKind::Loop(LoopKind::While),
             UnifiedKind::Loop(LoopKind::DoWhile),
             UnifiedKind::Branch(BranchKind::If),
+            UnifiedKind::BranchClause(BranchClauseKind::Then),
+            UnifiedKind::BranchClause(BranchClauseKind::Else),
         ]
+    );
+}
+
+#[test]
+fn rust_else_if_exposes_branch_clause() {
+    let src = r#"
+fn main() {
+    if a {
+    } else if b {
+    } else {
+    }
+}
+"#;
+    let k = kinds_sample(Language::Rust, src);
+    assert!(
+        k.contains(&UnifiedKind::BranchClause(BranchClauseKind::ElseIf)),
+        "expected BranchClause(ElseIf), got {k:?}"
     );
 }

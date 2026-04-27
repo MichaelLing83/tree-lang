@@ -32,7 +32,11 @@ fn find_supports_file_and_directory_inputs() {
         ])
         .output()
         .expect("run tree-lang find (file)");
-    assert!(out_file.status.success(), "stderr: {}", String::from_utf8_lossy(&out_file.stderr));
+    assert!(
+        out_file.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out_file.stderr)
+    );
     let stdout_file = String::from_utf8_lossy(&out_file.stdout);
     assert!(stdout_file.contains("parse_expr_assoc_with"));
 
@@ -49,7 +53,11 @@ fn find_supports_file_and_directory_inputs() {
         ])
         .output()
         .expect("run tree-lang find (dir)");
-    assert!(out_dir.status.success(), "stderr: {}", String::from_utf8_lossy(&out_dir.stderr));
+    assert!(
+        out_dir.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out_dir.stderr)
+    );
     let stdout_dir = String::from_utf8_lossy(&out_dir.stdout);
     assert!(stdout_dir.contains("parse_expr_assoc_with"));
 }
@@ -72,9 +80,16 @@ fn find_honors_exclude_regex() {
         ])
         .output()
         .expect("run tree-lang find with exclude");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.trim().is_empty(), "expected no matches, got:\n{stdout}");
+    assert!(
+        stdout.trim().is_empty(),
+        "expected no matches, got:\n{stdout}"
+    );
 }
 
 #[test]
@@ -99,7 +114,11 @@ fn find_supports_parameter_filters() {
         ])
         .output()
         .expect("run tree-lang find with parameter filters");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("parse_expr_assoc_with"));
 }
@@ -131,7 +150,11 @@ fn find_supports_return_type_filter() {
             .expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("keep"), "stdout: {stdout}");
     assert!(!stdout.contains("skip"), "stdout: {stdout}");
@@ -140,14 +163,7 @@ fn find_supports_return_type_filter() {
 #[test]
 fn find_accepts_branch_kind_in_output_style_branch_if() {
     let mut cmd = bin_cmd();
-    cmd.args([
-        "find",
-        "-",
-        "-l",
-        "rust",
-        "-k",
-        "branch(if)",
-    ]);
+    cmd.args(["find", "-", "-l", "rust", "-k", "branch(if)"]);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -159,7 +175,11 @@ fn find_accepts_branch_kind_in_output_style_branch_if() {
             .expect("write");
     }
     let out = child.wait_with_output().expect("wait");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("Branch(If)"),
@@ -181,12 +201,54 @@ fn find_accepts_loop_kind_in_output_style_loop_for() {
         ])
         .output()
         .expect("run tree-lang find -k loop(for)");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("Loop(For)"),
         "expected Loop(For) in output, got:\n{stdout}"
     );
+}
+
+#[test]
+fn find_accepts_any_kind_wildcard() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-l",
+        "rust",
+        "-k",
+        "any",
+        "--print-format",
+        "{type}",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"fn f() { for _ in 0..1 { } if a { } else { } }\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("FunctionDefinition"), "stdout: {stdout}");
+    assert!(stdout.contains("Loop(For)"), "stdout: {stdout}");
+    assert!(stdout.contains("Branch(If)"), "stdout: {stdout}");
+    assert!(stdout.contains("BranchClause(Then)"), "stdout: {stdout}");
+    assert!(stdout.contains("BranchClause(Else)"), "stdout: {stdout}");
 }
 
 #[test]
@@ -198,14 +260,14 @@ fn find_supports_pipeline_step() {
             c_file.to_str().expect("utf8 path"),
             "-l",
             "c",
-        "-k",
+            "-k",
             "loop",
             "--step",
             "ob=node",
             "--step",
             "ob.has(loop)",
-        "--step",
-        "emit:pipeline-ok",
+            "--step",
+            "emit:pipeline-ok",
         ])
         .output()
         .expect("run tree-lang find with --step pipeline");
@@ -219,6 +281,44 @@ fn find_supports_pipeline_step() {
         stdout.contains("pipeline-ok"),
         "expected pipeline print, got:\n{stdout}"
     );
+}
+
+#[test]
+fn find_supports_short_step_flag() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-l",
+        "rust",
+        "-k",
+        "function_definition",
+        "-s",
+        "n=node",
+        "-s",
+        "n.has(any)",
+        "-s",
+        "emit:SHORT-STEP-OK",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"fn f() { if true { } }\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("SHORT-STEP-OK"), "stdout: {stdout}");
 }
 
 #[test]
@@ -245,12 +345,14 @@ fn find_supports_pipeline_is_step() {
     let mut child = cmd.spawn().expect("spawn tree-lang");
     {
         let stdin = child.stdin.as_mut().expect("stdin available");
-        stdin
-            .write_all(b"for(;;) {}")
-            .expect("write stdin");
+        stdin.write_all(b"for(;;) {}").expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("IS-OK"), "stdout: {stdout}");
 }
@@ -284,7 +386,11 @@ fn find_supports_pipeline_first_step() {
             .expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("STRIP-OK"), "stdout: {stdout}");
 }
@@ -318,9 +424,83 @@ fn find_supports_assigning_first_result() {
             .expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Branch(If):Branch(If)"), "stdout: {stdout}");
+}
+
+#[test]
+fn find_supports_branch_clause_kinds() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-l",
+        "rust",
+        "-k",
+        "branch_clause:elseif",
+        "--print-format",
+        "{type}",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"fn f() { if a { } else if b { } else { } }\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("BranchClause(ElseIf)"), "stdout: {stdout}");
+}
+
+#[test]
+fn find_pipeline_can_enter_else_branch() {
+    let mut cmd = bin_cmd();
+    cmd.args([
+        "find",
+        "-",
+        "-l",
+        "rust",
+        "-k",
+        "branch:if",
+        "--step",
+        "c=node.else.first(loop)",
+        "--print-format",
+        "{c.type}",
+    ]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn tree-lang");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin available");
+        stdin
+            .write_all(b"fn f() { if a { } else { for _ in 0..1 { } } }\n")
+            .expect("write stdin");
+    }
+    let out = child.wait_with_output().expect("wait output");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Loop(For)"), "stdout: {stdout}");
 }
 
 #[test]
@@ -352,10 +532,17 @@ fn find_supports_pipeline_node_emit_per_match() {
             .expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
-        stdout.lines().filter(|l| l.contains("PER-MATCH-OK")).count(),
+        stdout
+            .lines()
+            .filter(|l| l.contains("PER-MATCH-OK"))
+            .count(),
         2,
         "stdout: {stdout}"
     );
@@ -388,7 +575,11 @@ fn find_supports_pipeline_expand_step() {
             .expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("EXPAND-OK"), "stdout: {stdout}");
 }
@@ -418,7 +609,11 @@ fn find_supports_print_and_print_format() {
         String::from_utf8_lossy(&out_print.stderr)
     );
     let stdout_print = String::from_utf8_lossy(&out_print.stdout);
-    assert!(stdout_print.lines().next().expect("one line").starts_with("FunctionDefinition\t"));
+    assert!(stdout_print
+        .lines()
+        .next()
+        .expect("one line")
+        .starts_with("FunctionDefinition\t"));
 
     let out_fmt = bin_cmd()
         .args([
@@ -471,7 +666,11 @@ fn find_print_format_supports_body_byte_placeholders() {
             .expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let first = stdout.lines().next().expect("one line");
     let mut parts = first.split('|');
@@ -507,7 +706,11 @@ fn find_print_format_supports_body_placeholder() {
             .expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.starts_with("f|{"), "stdout: {stdout}");
     assert!(stdout.contains('1'), "stdout: {stdout}");
@@ -538,7 +741,11 @@ fn find_print_format_supports_language_placeholder() {
         stdin.write_all(b"fn g() {}\n").expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(stdout.trim(), "rust|g", "stdout: {stdout}");
 }
@@ -568,7 +775,11 @@ fn find_print_format_supports_start_byte_placeholder() {
         stdin.write_all(b"fn h() {}\n").expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.trim().parse::<usize>().is_ok(),
@@ -603,7 +814,11 @@ fn find_supports_stdin_input() {
             .expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("<stdin>|parse_x"), "stdout: {stdout}");
 }
@@ -611,14 +826,7 @@ fn find_supports_stdin_input() {
 #[test]
 fn find_stdin_requires_explicit_language_when_default_is_auto() {
     let mut cmd = bin_cmd();
-    cmd.args([
-        "find",
-        "-",
-        "-k",
-        "function_definition",
-        "-n",
-        "^parse_x$",
-    ]);
+    cmd.args(["find", "-", "-k", "function_definition", "-n", "^parse_x$"]);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -631,7 +839,11 @@ fn find_stdin_requires_explicit_language_when_default_is_auto() {
             .expect("write stdin");
     }
     let out = child.wait_with_output().expect("wait output");
-    assert!(!out.status.success(), "expected failure, stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        !out.status.success(),
+        "expected failure, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("--language auto cannot be used with stdin"),
@@ -695,7 +907,11 @@ fn find_auto_detects_supported_language_and_skips_unsupported() {
 
     fs::remove_dir_all(&tmp_dir).expect("cleanup temp dir");
 
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stdout.contains("auto_ok"), "stdout: {stdout}");

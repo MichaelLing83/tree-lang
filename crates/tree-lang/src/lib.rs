@@ -8,7 +8,7 @@ mod classify;
 mod language;
 
 pub use language::Language;
-pub use tree_lang_core::{BranchKind, LoopKind, MappedNode, Span, UnifiedKind};
+pub use tree_lang_core::{BranchClauseKind, BranchKind, LoopKind, MappedNode, Span, UnifiedKind};
 pub use tree_sitter::{Node, Tree};
 
 use classify::classify;
@@ -74,11 +74,7 @@ pub enum TreeTraversal {
 
 /// Visit `root` and every descendant in the given order; all children are visited in
 /// tree-sitter `children` order, same as [`walk`].
-pub fn for_each_subtree_node(
-    root: Node<'_>,
-    order: TreeTraversal,
-    mut f: impl FnMut(Node<'_>),
-) {
+pub fn for_each_subtree_node(root: Node<'_>, order: TreeTraversal, mut f: impl FnMut(Node<'_>)) {
     match order {
         TreeTraversal::DfsPreorder => dfs_preorder(root, &mut f),
         TreeTraversal::DfsPostorder => dfs_postorder(root, &mut f),
@@ -130,7 +126,11 @@ pub fn extract_unified(language: Language, tree: &Tree) -> Vec<MappedNode> {
 }
 
 /// Depth-first walk of `tree`, returning nodes whose kind is in `kinds`.
-pub fn extract_unified_kinds(language: Language, tree: &Tree, kinds: &[UnifiedKind]) -> Vec<MappedNode> {
+pub fn extract_unified_kinds(
+    language: Language,
+    tree: &Tree,
+    kinds: &[UnifiedKind],
+) -> Vec<MappedNode> {
     let mut out = Vec::new();
     walk(language, tree.root_node(), &mut out, Some(kinds));
     out
@@ -170,7 +170,11 @@ pub fn map_unified_node(language: Language, node: &Node<'_>) -> Option<MappedNod
 /// from the same walk `find_unified_kinds` would use (e.g. root is `translation_unit` with one
 /// `for_statement` child). Used for `find` pipeline `is:VAR:KIND` (whole text is that construct,
 /// not merely "contains" it).
-pub fn match_root_as_unified(language: Language, source: &str, kinds: &[UnifiedKind]) -> Option<MappedNode> {
+pub fn match_root_as_unified(
+    language: Language,
+    source: &str,
+    kinds: &[UnifiedKind],
+) -> Option<MappedNode> {
     let len = source.len();
     let tree = parse(language, source).ok()?;
     let root = tree.root_node();
@@ -196,7 +200,12 @@ pub fn find_function_definitions(
     Ok(out)
 }
 
-fn walk(language: Language, node: Node<'_>, out: &mut Vec<MappedNode>, kinds: Option<&[UnifiedKind]>) {
+fn walk(
+    language: Language,
+    node: Node<'_>,
+    out: &mut Vec<MappedNode>,
+    kinds: Option<&[UnifiedKind]>,
+) {
     let span = Span::new(node.range().start_byte, node.range().end_byte);
     if let Some(mut m) = classify(language, node.kind(), span) {
         m.body = unified_body_span(language, node, m.kind);
@@ -206,6 +215,9 @@ fn walk(language: Language, node: Node<'_>, out: &mut Vec<MappedNode>, kinds: Op
         };
         if matched {
             out.push(m);
+        }
+        if m.kind == UnifiedKind::Branch(BranchKind::If) {
+            push_if_branch_clauses(language, node, out, kinds);
         }
     }
     let mut cursor = node.walk();
@@ -261,6 +273,10 @@ fn span_from_field(node: Node<'_>, field: &str) -> Option<Span> {
     Some(Span::new(n.range().start_byte, n.range().end_byte))
 }
 
+fn node_from_field<'a>(node: Node<'a>, field: &str) -> Option<Node<'a>> {
+    node.child_by_field_name(field)
+}
+
 /// Primary body span for unified kinds: `body` for functions/loops/switch/match; `consequence`
 /// for `if` then-branch when present.
 fn unified_body_span(_language: Language, node: Node<'_>, kind: UnifiedKind) -> Option<Span> {
@@ -268,9 +284,72 @@ fn unified_body_span(_language: Language, node: Node<'_>, kind: UnifiedKind) -> 
         UnifiedKind::Branch(BranchKind::If) => {
             span_from_field(node, "consequence").or_else(|| span_from_field(node, "body"))
         }
-        UnifiedKind::Branch(BranchKind::Switch | BranchKind::Match) => span_from_field(node, "body"),
+        UnifiedKind::Branch(BranchKind::Switch | BranchKind::Match) => {
+            span_from_field(node, "body")
+        }
+        UnifiedKind::BranchClause(_) => {
+            Some(Span::new(node.range().start_byte, node.range().end_byte))
+        }
         UnifiedKind::FunctionDefinition | UnifiedKind::Loop(_) => span_from_field(node, "body"),
     }
+}
+
+fn push_if_branch_clauses(
+    language: Language,
+    if_node: Node<'_>,
+    out: &mut Vec<MappedNode>,
+    kinds: Option<&[UnifiedKind]>,
+) {
+    if let Some(then_node) =
+        node_from_field(if_node, "consequence").or_else(|| node_from_field(if_node, "body"))
+    {
+        push_synthetic_clause(out, kinds, BranchClauseKind::Then, then_node);
+    }
+
+    let Some(alt_node) =
+        node_from_field(if_node, "alternative").or_else(|| node_from_field(if_node, "else_clause"))
+    else {
+        return;
+    };
+    let kind = if node_is_if_branch(language, alt_node)
+        || first_named_child_is_if_branch(language, alt_node)
+    {
+        BranchClauseKind::ElseIf
+    } else {
+        BranchClauseKind::Else
+    };
+    push_synthetic_clause(out, kinds, kind, alt_node);
+}
+
+fn node_is_if_branch(language: Language, node: Node<'_>) -> bool {
+    map_unified_node(language, &node).is_some_and(|m| m.kind == UnifiedKind::Branch(BranchKind::If))
+}
+
+fn first_named_child_is_if_branch(language: Language, node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    let result = node
+        .children(&mut cursor)
+        .find(|child| child.is_named())
+        .is_some_and(|child| node_is_if_branch(language, child));
+    result
+}
+
+fn push_synthetic_clause(
+    out: &mut Vec<MappedNode>,
+    filters: Option<&[UnifiedKind]>,
+    kind: BranchClauseKind,
+    node: Node<'_>,
+) {
+    let unified = UnifiedKind::BranchClause(kind);
+    if filters.is_some_and(|f| !f.contains(&unified)) {
+        return;
+    }
+    let span = Span::new(node.range().start_byte, node.range().end_byte);
+    out.push(MappedNode {
+        kind: unified,
+        span,
+        body: Some(span),
+    });
 }
 
 fn extract_function_parameters(
@@ -296,7 +375,11 @@ fn extract_function_parameters(
     }
 }
 
-fn extract_function_return_type(language: Language, node: Node<'_>, source: &[u8]) -> Option<String> {
+fn extract_function_return_type(
+    language: Language,
+    node: Node<'_>,
+    source: &[u8],
+) -> Option<String> {
     let normalize = |raw: String| {
         let trimmed = raw.trim();
         let without_arrow = trimmed.strip_prefix("->").map(str::trim).unwrap_or(trimmed);
@@ -311,9 +394,9 @@ fn extract_function_return_type(language: Language, node: Node<'_>, source: &[u8
             .child_by_field_name("return_type")
             .and_then(|n| node_text(n, source))
             .and_then(normalize),
-        Language::Java | Language::C | Language::Cpp => {
-            node.child_by_field_name("type").and_then(|n| node_text(n, source))
-        }
+        Language::Java | Language::C | Language::Cpp => node
+            .child_by_field_name("type")
+            .and_then(|n| node_text(n, source)),
     }
 }
 
@@ -343,12 +426,15 @@ fn extract_c_like_parameters(parameters_node: Node<'_>, source: &[u8]) -> Vec<Fu
             continue;
         }
         let declarator = child.child_by_field_name("declarator");
-        let declarator_name_node =
-            declarator.and_then(c_like_declarator_name_node).or_else(|| child.child_by_field_name("name"));
+        let declarator_name_node = declarator
+            .and_then(c_like_declarator_name_node)
+            .or_else(|| child.child_by_field_name("name"));
         let name = declarator_name_node
             .and_then(|n| node_text(n, source))
             .or_else(|| declarator.and_then(|d| extract_c_like_declarator_name(d, source)));
-        let mut ty = child.child_by_field_name("type").and_then(|t| node_text(t, source));
+        let mut ty = child
+            .child_by_field_name("type")
+            .and_then(|t| node_text(t, source));
         if let Some(name_node) = declarator_name_node {
             ty = c_like_parameter_type_from_full(child, source, name_node).or_else(|| {
                 let name_ref = name.as_deref().unwrap_or_default();
@@ -383,7 +469,9 @@ fn extract_rust_parameters(parameters_node: Node<'_>, source: &[u8]) -> Vec<Func
             continue;
         }
         if child.kind() == "self_parameter" {
-            let ty = child.child_by_field_name("type").and_then(|t| node_text(t, source));
+            let ty = child
+                .child_by_field_name("type")
+                .and_then(|t| node_text(t, source));
             out.push(FunctionParameter {
                 name: "self".to_string(),
                 ty,
@@ -393,8 +481,14 @@ fn extract_rust_parameters(parameters_node: Node<'_>, source: &[u8]) -> Vec<Func
         let name = child
             .child_by_field_name("pattern")
             .and_then(|p| first_identifier_descendant(p, source))
-            .or_else(|| child.child_by_field_name("name").and_then(|n| node_text(n, source)));
-        let ty = child.child_by_field_name("type").and_then(|t| node_text(t, source));
+            .or_else(|| {
+                child
+                    .child_by_field_name("name")
+                    .and_then(|n| node_text(n, source))
+            });
+        let ty = child
+            .child_by_field_name("type")
+            .and_then(|t| node_text(t, source));
         if let Some(name) = name {
             out.push(FunctionParameter { name, ty });
         }
@@ -413,7 +507,9 @@ fn extract_python_parameters(parameters_node: Node<'_>, source: &[u8]) -> Vec<Fu
             .child_by_field_name("name")
             .and_then(|n| node_text(n, source))
             .or_else(|| first_identifier_descendant(child, source));
-        let ty = child.child_by_field_name("type").and_then(|t| node_text(t, source));
+        let ty = child
+            .child_by_field_name("type")
+            .and_then(|t| node_text(t, source));
         if let Some(name) = name {
             out.push(FunctionParameter { name, ty });
         }
@@ -432,7 +528,9 @@ fn extract_java_parameters(parameters_node: Node<'_>, source: &[u8]) -> Vec<Func
         let name = name_node
             .and_then(|n| node_text(n, source))
             .or_else(|| first_identifier_descendant(child, source));
-        let mut ty = child.child_by_field_name("type").and_then(|t| node_text(t, source));
+        let mut ty = child
+            .child_by_field_name("type")
+            .and_then(|t| node_text(t, source));
         if let Some(name_node) = name_node {
             if let Some(full_ty) = java_parameter_type_from_full(child, source, name_node) {
                 ty = Some(full_ty);
@@ -447,7 +545,10 @@ fn extract_java_parameters(parameters_node: Node<'_>, source: &[u8]) -> Vec<Func
 
 fn extract_c_like_declarator_name(node: Node<'_>, source: &[u8]) -> Option<String> {
     match node.kind() {
-        "identifier" | "field_identifier" | "qualified_identifier" | "operator_name"
+        "identifier"
+        | "field_identifier"
+        | "qualified_identifier"
+        | "operator_name"
         | "destructor_name" => return node_text(node, source),
         _ => {}
     }
@@ -540,7 +641,10 @@ fn java_parameter_type_from_full(
 
 fn c_like_declarator_name_node(node: Node<'_>) -> Option<Node<'_>> {
     match node.kind() {
-        "identifier" | "field_identifier" | "qualified_identifier" | "operator_name"
+        "identifier"
+        | "field_identifier"
+        | "qualified_identifier"
+        | "operator_name"
         | "destructor_name" => return Some(node),
         _ => {}
     }
@@ -594,6 +698,18 @@ fn parse_branch_subtype(sub: &str) -> Result<BranchKind, String> {
     }
 }
 
+fn parse_branch_clause_subtype(sub: &str) -> Result<BranchClauseKind, String> {
+    let sub = sub.trim().replace('-', "_");
+    match sub.as_str() {
+        "then" | "consequence" | "body" => Ok(BranchClauseKind::Then),
+        "else" | "alternative" => Ok(BranchClauseKind::Else),
+        "elseif" | "else_if" | "elif" => Ok(BranchClauseKind::ElseIf),
+        other => Err(format!(
+            "unknown branch_clause subtype {other:?}: use then, else, or elseif (see README)"
+        )),
+    }
+}
+
 /// Parse CLI / API kind strings (`function_definition`, `branch`, `branch:if`, `loop:for`, …).
 pub fn kinds_from_cli(s: &str) -> Result<Vec<UnifiedKind>, String> {
     let normalized = s.trim().to_ascii_lowercase().replace('-', "_");
@@ -605,7 +721,10 @@ pub fn kinds_from_cli(s: &str) -> Result<Vec<UnifiedKind>, String> {
         .strip_prefix("loop(")
         .and_then(|rest| rest.strip_suffix(')'))
     {
-        let inner = inner.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let inner = inner
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
         let lk = parse_loop_subtype(&inner)?;
         return Ok(vec![UnifiedKind::Loop(lk)]);
     }
@@ -617,30 +736,78 @@ pub fn kinds_from_cli(s: &str) -> Result<Vec<UnifiedKind>, String> {
         .strip_prefix("branch(")
         .and_then(|rest| rest.strip_suffix(')'))
     {
-        let inner = inner.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let inner = inner
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
         let bk = parse_branch_subtype(&inner)?;
         return Ok(vec![UnifiedKind::Branch(bk)]);
     }
+    if let Some(sub) = normalized
+        .strip_prefix("branch_clause:")
+        .or_else(|| normalized.strip_prefix("branch_arm:"))
+    {
+        let ck = parse_branch_clause_subtype(sub)?;
+        return Ok(vec![UnifiedKind::BranchClause(ck)]);
+    }
+    if let Some(inner) = normalized
+        .strip_prefix("branch_clause(")
+        .or_else(|| normalized.strip_prefix("branch_arm("))
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let inner = inner
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        let ck = parse_branch_clause_subtype(&inner)?;
+        return Ok(vec![UnifiedKind::BranchClause(ck)]);
+    }
     match normalized.as_str() {
+        "any" => Ok(all_unified_kinds()),
         "functiondefinition" | "function_definition" | "fn" | "func" => {
             Ok(vec![UnifiedKind::FunctionDefinition])
         }
-        "branch" => Ok(vec![
-            UnifiedKind::Branch(BranchKind::If),
-            UnifiedKind::Branch(BranchKind::Switch),
-            UnifiedKind::Branch(BranchKind::Match),
-        ]),
-        "loop" => Ok(vec![
-            UnifiedKind::Loop(LoopKind::For),
-            UnifiedKind::Loop(LoopKind::ForEach),
-            UnifiedKind::Loop(LoopKind::While),
-            UnifiedKind::Loop(LoopKind::DoWhile),
-            UnifiedKind::Loop(LoopKind::Infinite),
-        ]),
+        "branch" => Ok(all_branch_kinds()),
+        "loop" => Ok(all_loop_kinds()),
+        "branch_clause" | "branch_arm" => Ok(all_branch_clause_kinds()),
         _ => Err(format!(
-            "unknown kind {s:?}: expected function_definition, branch, branch:<subtype>, branch(<subtype>), loop, loop:<subtype>, or loop(<subtype>) (see README)"
+            "unknown kind {s:?}: expected any, function_definition, branch, branch:<subtype>, branch_clause:<subtype>, loop, loop:<subtype>, or loop(<subtype>) (see README)"
         )),
     }
+}
+
+fn all_unified_kinds() -> Vec<UnifiedKind> {
+    let mut kinds = vec![UnifiedKind::FunctionDefinition];
+    kinds.extend(all_loop_kinds());
+    kinds.extend(all_branch_kinds());
+    kinds.extend(all_branch_clause_kinds());
+    kinds
+}
+
+fn all_loop_kinds() -> Vec<UnifiedKind> {
+    vec![
+        UnifiedKind::Loop(LoopKind::For),
+        UnifiedKind::Loop(LoopKind::ForEach),
+        UnifiedKind::Loop(LoopKind::While),
+        UnifiedKind::Loop(LoopKind::DoWhile),
+        UnifiedKind::Loop(LoopKind::Infinite),
+    ]
+}
+
+fn all_branch_kinds() -> Vec<UnifiedKind> {
+    vec![
+        UnifiedKind::Branch(BranchKind::If),
+        UnifiedKind::Branch(BranchKind::Switch),
+        UnifiedKind::Branch(BranchKind::Match),
+    ]
+}
+
+fn all_branch_clause_kinds() -> Vec<UnifiedKind> {
+    vec![
+        UnifiedKind::BranchClause(BranchClauseKind::Then),
+        UnifiedKind::BranchClause(BranchClauseKind::Else),
+        UnifiedKind::BranchClause(BranchClauseKind::ElseIf),
+    ]
 }
 
 /// Default string used in CLI output and `{type}` templates.
@@ -648,6 +815,7 @@ pub fn format_kind(k: UnifiedKind) -> String {
     match k {
         UnifiedKind::FunctionDefinition => "FunctionDefinition".to_string(),
         UnifiedKind::Branch(bk) => format!("Branch({bk:?})"),
+        UnifiedKind::BranchClause(ck) => format!("BranchClause({ck:?})"),
         UnifiedKind::Loop(lk) => format!("Loop({lk:?})"),
     }
 }

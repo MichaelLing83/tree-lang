@@ -39,12 +39,24 @@ pub enum BranchKind {
     Match,
 }
 
+/// Individual arms / clauses synthesized from if-like branches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BranchClauseKind {
+    /// The then/consequence part of an `if`.
+    Then,
+    /// A final `else` part.
+    Else,
+    /// An `else if` / `elif` part.
+    ElseIf,
+}
+
 /// Cross-language syntax matched in the MVP (functions, loops, branches).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UnifiedKind {
     FunctionDefinition,
     Loop(LoopKind),
     Branch(BranchKind),
+    BranchClause(BranchClauseKind),
 }
 
 /// One tree-sitter subtree classified as a unified construct.

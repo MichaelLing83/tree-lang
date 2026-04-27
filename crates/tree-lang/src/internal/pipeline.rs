@@ -70,11 +70,12 @@ enum StepStmt {
     },
 }
 
-/// Which field to take in an ``=…body`` / ``=…consequence`` assignment.
+/// Which field to take in a relative field assignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RelBody {
     Body,
     Consequence,
+    Alternative,
 }
 
 #[derive(Debug, Clone)]
@@ -83,9 +84,9 @@ enum AssignSource {
     Node,
     /// The pipeline focus at this step (moves on ``is`` / ``has`` / ``first``).
     Current,
-    /// ``=body`` or ``=consequence`` (relative to **current**).
+    /// ``=body`` / ``=consequence`` / ``=else`` (relative to **current**).
     Relative(RelBody),
-    /// ``=x.body`` or ``=x.consequence`` (relative to binding ``x``).
+    /// ``=x.body`` / ``=x.consequence`` / ``=x.else`` (relative to binding ``x``).
     OnBinding { on: String, part: RelBody },
 }
 
@@ -463,6 +464,11 @@ fn first_preorder_match_skip_span(
         if set.contains(&m.kind) && Some(m.span) != skip_span {
             return Ok(Some(m));
         }
+        if m.kind == UnifiedKind::Branch(BranchKind::If) {
+            if let Some(clause) = first_if_clause_match(language, n, set, skip_span) {
+                return Ok(Some(clause));
+            }
+        }
     }
     let mut c = n.walk();
     for child in n.children(&mut c) {
@@ -471,6 +477,62 @@ fn first_preorder_match_skip_span(
         }
     }
     Ok(None)
+}
+
+fn first_if_clause_match(
+    language: Language,
+    if_node: Node<'_>,
+    set: &[UnifiedKind],
+    skip_span: Option<Span>,
+) -> Option<MappedNode> {
+    let then = if_node
+        .child_by_field_name("consequence")
+        .or_else(|| if_node.child_by_field_name("body"));
+    if let Some(n) = then {
+        let span = Span::new(n.range().start_byte, n.range().end_byte);
+        let kind = UnifiedKind::BranchClause(tree_lang::BranchClauseKind::Then);
+        if set.contains(&kind) && Some(span) != skip_span {
+            return Some(MappedNode {
+                kind,
+                span,
+                body: Some(span),
+            });
+        }
+    }
+
+    let alt = if_node
+        .child_by_field_name("alternative")
+        .or_else(|| if_node.child_by_field_name("else_clause"))?;
+    let span = Span::new(alt.range().start_byte, alt.range().end_byte);
+    let clause_kind =
+        if node_is_if_branch(language, alt) || first_named_child_is_if_branch(language, alt) {
+            tree_lang::BranchClauseKind::ElseIf
+        } else {
+            tree_lang::BranchClauseKind::Else
+        };
+    let kind = UnifiedKind::BranchClause(clause_kind);
+    if set.contains(&kind) && Some(span) != skip_span {
+        Some(MappedNode {
+            kind,
+            span,
+            body: Some(span),
+        })
+    } else {
+        None
+    }
+}
+
+fn node_is_if_branch(language: Language, node: Node<'_>) -> bool {
+    map_unified_node(language, &node).is_some_and(|m| m.kind == UnifiedKind::Branch(BranchKind::If))
+}
+
+fn first_named_child_is_if_branch(language: Language, node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    let result = node
+        .children(&mut cursor)
+        .find(|child| child.is_named())
+        .is_some_and(|child| node_is_if_branch(language, child));
+    result
 }
 
 fn run_first(
@@ -507,9 +569,10 @@ fn resolve_first_base(
         let part = match field {
             "body" => RelBody::Body,
             "consequence" => RelBody::Consequence,
+            "else" | "alternative" => RelBody::Alternative,
             other => {
                 return Err(format!(
-                    "first() receiver field must be `body` or `consequence`, not {other:?}"
+                    "first() receiver field must be `body`, `consequence`, `else`, or `alternative`, not {other:?}"
                 ));
             }
         };
@@ -572,6 +635,23 @@ fn assign_body_or_consequence(
                 return BodyAssign::NoMatch;
             }
         }
+        RelBody::Alternative => {
+            if base.kind != UnifiedKind::Branch(BranchKind::If) {
+                return BodyAssign::NoMatch;
+            }
+            let Some(base_node) =
+                ts_node_exact(file_root, base.span.start_byte, base.span.end_byte)
+            else {
+                return BodyAssign::NoMatch;
+            };
+            let Some(alt) = base_node
+                .child_by_field_name("alternative")
+                .or_else(|| base_node.child_by_field_name("else_clause"))
+            else {
+                return BodyAssign::NoMatch;
+            };
+            Span::new(alt.range().start_byte, alt.range().end_byte)
+        }
     };
     if span.start_byte >= span.end_byte {
         return BodyAssign::NoMatch;
@@ -600,7 +680,7 @@ fn parse_one_step(s: &str) -> Result<StepStmt, String> {
             template: s[5..].to_string(),
         });
     }
-    // assign: name=node|current|body|consequence|x.body|x.consequence
+    // assign: name=node|current|body|consequence|else|x.body|x.consequence|x.else
     if let Some(eq) = s.find('=') {
         let name = s[..eq].trim();
         let rhs = s[eq + 1..].trim();
@@ -623,9 +703,10 @@ fn parse_one_step(s: &str) -> Result<StepStmt, String> {
             let part = match field {
                 "body" => RelBody::Body,
                 "consequence" => RelBody::Consequence,
+                "else" | "alternative" => RelBody::Alternative,
                 f => {
                     return Err(format!(
-                        "assign: after . use `body` or `consequence`, not {f:?} (in {rhs:?})"
+                        "assign: after . use `body`, `consequence`, `else`, or `alternative`, not {f:?} (in {rhs:?})"
                     ));
                 }
             };
@@ -639,9 +720,10 @@ fn parse_one_step(s: &str) -> Result<StepStmt, String> {
                 "current" => AssignSource::Current,
                 "body" => AssignSource::Relative(RelBody::Body),
                 "consequence" => AssignSource::Relative(RelBody::Consequence),
+                "else" | "alternative" => AssignSource::Relative(RelBody::Alternative),
                 o => {
                     return Err(format!(
-                        "assign: use node, current, body, consequence, or x.body / x.consequence, not {o:?}"
+                        "assign: use node, current, body, consequence, else, or x.body / x.consequence / x.else, not {o:?}"
                     ));
                 }
             }

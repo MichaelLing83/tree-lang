@@ -22,9 +22,10 @@ const STEP_ARG_HELP_SHORT: &str =
 /// Long help for `--step` (shared by `find` and all traverse subcommands).
 const STEP_ARG_LONG_HELP: &str = r"Pipeline steps — repeat `--step`; order matters (node-centric).
 
-  name=node | current | body | consequence | x.body | x.consequence
+  name=node | current | body | consequence | else | x.body | x.consequence | x.else
       `=node` is the per-hit find/traverse root; `=current` is the pipeline focus. `=body` / `=consequence`
-      are relative to **current**; `=x.body` / `=x.consequence` use another binding `x` (e.g. `b=n.body`).
+      are relative to **current**; `=else` / `=alternative` is the if alternative.
+      `=x.body` / `=x.consequence` / `=x.else` use another binding `x` (e.g. `b=n.body`).
       Does not move `current` by itself; later steps use the binding.
 
   x.is(KIND)          KIND uses the same grammar as -k. Fails the pipeline if `x` is
@@ -37,7 +38,7 @@ const STEP_ARG_LONG_HELP: &str = r"Pipeline steps — repeat `--step`; order mat
       `x` if it matches) whose kind is in that set. Sets `current` on success.
 
   name=x.first(A,B,…) Same as x.first(...), but also binds the result to `name`.
-      The receiver may also be x.body or x.consequence, e.g. c=x.body.first(loop).
+      The receiver may also be x.body, x.consequence, or x.else, e.g. c=x.else.first(loop).
 
   emit:TEMPLATE        One line of output mid-pipeline; `TEMPLATE` is like `--print-format`
       (dotted {x.y} for bindings plus legacy {type} etc. based on `current`).
@@ -81,6 +82,7 @@ struct TraverseArgs {
     #[arg(long = "print-format", value_name = "TEMPLATE")]
     print_format: Option<String>,
     #[arg(
+        short = 's',
         long = "step",
         value_name = "STEP",
         action = clap::ArgAction::Append,
@@ -119,8 +121,8 @@ struct FindArgs {
     /// Target language: c, cpp, java, python, rust, auto (default: auto).
     #[arg(short = 'l', long = "language", value_name = "LANG", default_value = "auto")]
     language: String,
-    /// Unified syntax kind: function_definition, branch, branch:<subtype> (e.g. branch:if),
-    /// branch(<subtype>) (e.g. branch(if)), loop, loop:<subtype>, loop(<subtype>).
+    /// Unified syntax kind: any, function_definition, branch, branch:<subtype> (e.g. branch:if),
+    /// branch_clause:<subtype> (then/else/elseif), loop, loop:<subtype>, loop(<subtype>).
     #[arg(short = 'k', long = "kind", value_name = "KIND")]
     kind: String,
     /// Match the name of found structures (when the selected kind has names, e.g. functions).
@@ -156,6 +158,7 @@ struct FindArgs {
     #[arg(long = "print-format", value_name = "TEMPLATE")]
     print_format: Option<String>,
     #[arg(
+        short = 's',
         long = "step",
         value_name = "STEP",
         action = clap::ArgAction::Append,

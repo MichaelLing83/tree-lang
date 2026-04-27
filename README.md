@@ -17,11 +17,13 @@ The same logical construct uses **different spellings** depending on whether you
 
 | Layer | Role | Examples |
 | ----- | ---- | -------- |
-| **CLI input** | `-k` / `--kind`, and the `KIND` argument in `x.has(KIND)` / `x.is(KIND)` in `--step` | `function_definition`, `branch`, `branch:if`, `branch:switch`, `branch:match`, `loop`, `loop:for`, … |
-| **CLI output** | Default `find` / traverse lines and `{type}` in templates | `FunctionDefinition`, `Branch(If)`, `Branch(Switch)`, `Loop(For)`, … |
-| **Rust API** | `tree_lang_core::UnifiedKind`, `LoopKind`, `BranchKind` | e.g. `UnifiedKind::Branch(BranchKind::If)` |
+| **CLI input** | `-k` / `--kind`, and the `KIND` argument in `x.has(KIND)` / `x.is(KIND)` in `--step` | `any`, `function_definition`, `branch`, `branch:if`, `branch_clause:else`, `loop`, `loop:for`, … |
+| **CLI output** | Default `find` / traverse lines and `{type}` in templates | `FunctionDefinition`, `Branch(If)`, `BranchClause(ElseIf)`, `Loop(For)`, … |
+| **Rust API** | `tree_lang_core::UnifiedKind`, `LoopKind`, `BranchKind`, `BranchClauseKind` | e.g. `UnifiedKind::Branch(BranchKind::If)` |
 
 Input is **ASCII**, case-insensitive, with `-` and `_` treated the same (`loop-for` ≡ `loop_for`).
+
+`any` matches every currently implemented `UnifiedKind`: function definitions, all loop subtypes, all branch subtypes, and all branch clause subtypes. It works anywhere a `KIND` is accepted, including `-k any`, `x.has(any)`, `x.is(any)`, and `x.first(any)`.
 
 **Loop subtypes (input):** use either `loop:<subtype>` or the same subtype inside parentheses to mirror output, for example:
 
@@ -40,6 +42,14 @@ Input is **ASCII**, case-insensitive, with `-` and `_` treated the same (`loop-f
 - `branch:match` or **`branch(match)`** → `Branch(Match)` (Rust `match`, Python `match`)
 
 `-k branch` matches **any** of the three branch subtypes in one search.
+
+**Branch clause subtypes (input):** `branch_clause:<subtype>` (or `branch_arm:<subtype>`) finds synthetic then/else arms produced from `if` nodes:
+
+- `branch_clause:then` → `BranchClause(Then)` (the if consequence / then body)
+- `branch_clause:else` → `BranchClause(Else)` (the final else alternative)
+- `branch_clause:elseif` / `branch_clause:elif` / `branch_clause:else_if` → `BranchClause(ElseIf)`
+
+`-k branch` does **not** include branch clauses; use `-k branch_clause` to search all clause subtypes.
 
 ### What counts as a `loop` (by language)
 
@@ -160,7 +170,7 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
     - `{content}` (escaped node text)
     - `{body}`, `{language}`, `{start_byte}`, `{end_byte}`, `{body_start_byte}`, `{body_end_byte}`
 
-- `--step <STEP>` (repeatable; `find` only when not using function-definition name/param filters)
+- `-s, --step <STEP>` (repeatable; `find` only when not using function-definition name/param filters)
   - one statement per flag; order matters. Full grammar is in [**Step pipeline (detailed)**](#step-pipeline) below, and in `tree-lang find --help`.
 
 <a id="step-pipeline"></a>
@@ -168,7 +178,7 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
 
 Each `find` hit (or each unified visit in **Traverse** commands) can run a short **node-centric** pipeline. Steps share a set of **bindings**—named nodes plus the built-in names `node` and `current`—and execute in order. Unless you use `emit:`, a successful pipeline ends with the usual one-line output from `--print` / `--print-format`, using the **final** `current` and all bindings when expanding templates (see *Printing and templates* in this section).
 
-**Bind names.** Use identifiers such as `x`, `b`, or `L2`. The right-hand side of an assignment is either a reserved word (`node`, `current`, `body`, `consequence`), a dotted field form `other.body` / `other.consequence`, or the query form `other.first(...)` / `other.body.first(...)` where `other` is an existing binding (not a free expression).
+**Bind names.** Use identifiers such as `x`, `b`, or `L2`. The right-hand side of an assignment is either a reserved word (`node`, `current`, `body`, `consequence`, `else`), a dotted field form `other.body` / `other.consequence` / `other.else`, or the query form `other.first(...)` / `other.body.first(...)` / `other.else.first(...)` where `other` is an existing binding (not a free expression).
 
 | Form | Meaning |
 | ---- | ------- |
@@ -178,10 +188,11 @@ Each `find` hit (or each unified visit in **Traverse** commands) can run a short
 | `name=consequence` | Same for the then-branch of **`branch:if` only** (equivalent to `=current.consequence` when it applies). If the current node is not an `if`, the hit is skipped. |
 | `name=x.body` | The body span of an **existing** binding `x` (e.g. `b1=n.body` after `n=node`). Unknown `x` is a pipeline error. |
 | `name=x.consequence` | The if-then span of binding `x` when it is a `branch:if` (same rules as `=consequence` on `current`). |
+| `name=else` / `name=x.else` | The else / alternative span of the current node or binding `x` when it is a `branch:if`. `alternative` is accepted as an alias. If there is no else branch, the hit is skipped. |
 | `x.is(KIND)` | `KIND` uses the **same grammar as `-k`** (see *Unified kinds*). The binding `x` must be one of those kinds; on success, sets **`current` ← `x`**. If it fails, this match is dropped. |
-| `x.has(KIND)` | Re-parses the text inside **`x`’s span** (as a sub-slice) and looks for a unified hit of the given `KIND` that is **strictly inside** the slice (the full-span match is not counted—same as “first inner” semantics). On success, sets **`current`** to that inner node. If there is no such node, the match is dropped. |
+| `x.has(KIND)` | Walks the already-parsed tree inside **`x`’s span** and looks for a unified hit of the given `KIND` that is **strictly inside** the slice (the full-span match is not counted—same as “first inner” semantics). On success, sets **`current`** to that inner node. If there is no such node, the match is dropped. |
 | `x.first(A, B, …)` | Each argument is a `KIND` list in `-k` syntax; the set of allowed `UnifiedKind` values is the **union** of all arguments. Walks the file’s parse tree **depth-first, preorder** starting from the node covering `x`’s span, **including** `x` if it already matches, and sets **`current`** to the first matching node. If none, the match is dropped. Comma is split at the top level only; nested `loop(for)`-style kind strings are written inside the parentheses, not as extra comma arguments. |
-| `name=x.first(A, B, …)` | Same search as `x.first(...)`, but also stores the found node into `name`. The receiver may also be `x.body` or `x.consequence`, e.g. `name=x.body.first(loop)`. On success, it also sets **`current`** to that found node. |
+| `name=x.first(A, B, …)` | Same search as `x.first(...)`, but also stores the found node into `name`. The receiver may also be `x.body`, `x.consequence`, or `x.else`, e.g. `name=x.else.first(loop)`. On success, it also sets **`current`** to that found node. |
 | `emit:`*`TEMPLATE`* | Evaluates *TEMPLATE* like global `--print-format` and prints **one** line to stdout (mid-pipeline). Supports **dotted** placeholders `{` *name* `.` *field* `}` for any in-scope binding, plus the legacy placeholders (see the next subsection). If you use at least one `emit:`, the usual final one-line print for that hit is **not** produced (use `emit:` and/or design the pipeline so the last step is enough). |
 
 **`node` and `current` are always in scope** as binding names, alongside any names you introduce with `=…`. They are updated on each step as described above (especially `current` after `is` / `has` / `first`).
