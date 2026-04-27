@@ -7,7 +7,7 @@ use regex::Regex;
 use walkdir::WalkDir;
 
 use tree_lang::{
-    find_function_definitions, find_unified_kinds, format_kind, for_each_subtree_node,
+    extract_unified_kinds, find_function_definitions, format_kind, for_each_subtree_node,
     kinds_from_cli, map_unified_node, parse, Language, MappedNode, TreeTraversal,
     UnifiedKind,
 };
@@ -569,7 +569,14 @@ fn process_traverse_source(
     for_each_subtree_node(tree.root_node(), order, |node| {
         if let Some(m) = map_unified_node(language, &node) {
             if let Some(prog) = pipeline {
-                match pipeline::run_unified_pipeline(path, source, language, &m, prog) {
+                match pipeline::run_unified_pipeline(
+                    path,
+                    source,
+                    language,
+                    tree.root_node(),
+                    &m,
+                    prog,
+                ) {
                     Ok(Some(out)) if out.need_default_print => {
                         if let Some(ap) = &out.after {
                             print_unified_after(
@@ -670,17 +677,25 @@ fn process_source(
             );
         }
     } else {
-        let matches = match find_unified_kinds(language, source, kinds) {
-            Ok(m) => m,
+        let tree = match parse(language, source) {
+            Ok(t) => t,
             Err(e) => {
                 eprintln!("{}: parse error: {e}", path.display());
                 *had_error = true;
                 return;
             }
         };
+        let matches = extract_unified_kinds(language, &tree, kinds);
         if let Some(prog) = pipeline {
             for m in &matches {
-                match pipeline::run_unified_pipeline(path, source, language, m, prog) {
+                match pipeline::run_unified_pipeline(
+                    path,
+                    source,
+                    language,
+                    tree.root_node(),
+                    m,
+                    prog,
+                ) {
                     Ok(Some(out)) if out.need_default_print => {
                         if let Some(ap) = &out.after {
                             print_unified_after(

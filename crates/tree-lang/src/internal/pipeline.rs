@@ -22,11 +22,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use tree_sitter::Node;
 use tree_lang::{
-    find_unified_kinds, format_kind, kinds_from_cli, map_unified_node, parse, BranchKind, Language,
-    MappedNode, Span, UnifiedKind,
+    format_kind, kinds_from_cli, map_unified_node, BranchKind, Language, MappedNode, Span,
+    UnifiedKind,
 };
+use tree_sitter::Node;
 
 use crate::{byte_to_line_col, render_template, span_text};
 
@@ -48,15 +48,26 @@ enum StepStmt {
         name: String,
         source: AssignSource,
     },
-    Is { on: String, kind: String },
-    Has { on: String, kind: String },
-    First { on: String, args: Vec<String> },
+    Is {
+        on: String,
+        kinds: Vec<UnifiedKind>,
+    },
+    Has {
+        on: String,
+        kinds: Vec<UnifiedKind>,
+    },
+    First {
+        on: String,
+        kinds: Vec<UnifiedKind>,
+    },
     AssignFirst {
         name: String,
         on: String,
-        args: Vec<String>,
+        kinds: Vec<UnifiedKind>,
     },
-    Emit { template: String },
+    Emit {
+        template: String,
+    },
 }
 
 /// Which field to take in an ``=…body`` / ``=…consequence`` assignment.
@@ -110,6 +121,7 @@ pub fn run_unified_pipeline(
     path: &Path,
     source: &str,
     language: Language,
+    file_root: Node<'_>,
     root: &MappedNode,
     program: &StepProgram,
 ) -> Result<Option<PipelineRunOutcome>, String> {
@@ -123,9 +135,6 @@ pub fn run_unified_pipeline(
             }),
         }));
     }
-    let tree = parse(language, source)
-        .map_err(|e: tree_lang::ParseError| format!("parse file: {e}"))?;
-    let file_root = tree.root_node();
     let mut current = *root;
     let node_root = *root;
     let mut bindings = default_bindings(*root);
@@ -138,12 +147,7 @@ pub fn run_unified_pipeline(
                     AssignSource::Node => node_root,
                     AssignSource::Current => current,
                     AssignSource::Relative(part) => {
-                        match assign_body_or_consequence(
-                            language,
-                            file_root,
-                            &current,
-                            *part,
-                        ) {
+                        match assign_body_or_consequence(language, file_root, &current, *part) {
                             BodyAssign::Ok(m) => m,
                             BodyAssign::NoMatch => {
                                 return Ok(None);
@@ -151,9 +155,9 @@ pub fn run_unified_pipeline(
                         }
                     }
                     AssignSource::OnBinding { on, part } => {
-                        let base = *bindings
-                            .get(on)
-                            .ok_or_else(|| format!("unknown name {on:?} in =…body / =…consequence"))?;
+                        let base = *bindings.get(on).ok_or_else(|| {
+                            format!("unknown name {on:?} in =…body / =…consequence")
+                        })?;
                         match assign_body_or_consequence(language, file_root, &base, *part) {
                             BodyAssign::Ok(m) => m,
                             BodyAssign::NoMatch => {
@@ -164,49 +168,42 @@ pub fn run_unified_pipeline(
                 };
                 bindings.insert(name.clone(), m);
             }
-            StepStmt::Is { on, kind } => {
+            StepStmt::Is { on, kinds } => {
                 let x = *bindings
                     .get(on)
                     .ok_or_else(|| format!("unknown name {on:?} in is()"))?;
-                let allowed = kinds_from_cli(kind.as_str())?;
-                if !allowed.contains(&x.kind) {
+                if !kinds.contains(&x.kind) {
                     return Ok(None);
                 }
                 current = x;
                 bindings.insert("current".to_string(), current);
             }
-            StepStmt::Has { on, kind } => {
-                let sp = bindings
+            StepStmt::Has { on, kinds } => {
+                let base = *bindings
                     .get(on)
-                    .ok_or_else(|| format!("unknown name {on:?} in has()"))?
-                    .span;
-                let slice = source
-                    .get(sp.start_byte..sp.end_byte)
-                    .ok_or_else(|| "has: span out of range".to_string())?;
-                if slice.is_empty() {
+                    .ok_or_else(|| format!("unknown name {on:?} in has()"))?;
+                if base.span.start_byte >= base.span.end_byte {
                     return Ok(None);
                 }
-                let target = kinds_from_cli(kind.as_str())?;
-                let found = find_unified_kinds(language, slice, &target);
-                let m = found.ok().and_then(|v| {
-                    let slen = slice.len();
-                    v.into_iter()
-                        .find(|m| m.span.start_byte != 0 || m.span.end_byte != slen)
-                });
+                let Some(n) = ts_node_exact(file_root, base.span.start_byte, base.span.end_byte)
+                else {
+                    return Ok(None);
+                };
+                let m = first_preorder_match_skip_span(language, n, kinds, Some(base.span))?;
                 let Some(m) = m else { return Ok(None) };
-                current = offset(&m, sp.start_byte);
+                current = m;
                 bindings.insert("current".to_string(), current);
             }
-            StepStmt::First { on, args } => {
-                let m = run_first(language, file_root, &bindings, on, args)?;
+            StepStmt::First { on, kinds } => {
+                let m = run_first(language, file_root, &bindings, on, kinds)?;
                 let Some(m) = m else {
                     return Ok(None);
                 };
                 current = m;
                 bindings.insert("current".to_string(), current);
             }
-            StepStmt::AssignFirst { name, on, args } => {
-                let m = run_first(language, file_root, &bindings, on, args)?;
+            StepStmt::AssignFirst { name, on, kinds } => {
+                let m = run_first(language, file_root, &bindings, on, kinds)?;
                 let Some(m) = m else {
                     return Ok(None);
                 };
@@ -221,13 +218,7 @@ pub fn run_unified_pipeline(
                     current,
                     bindings: bindings.clone(),
                 };
-                let line = render_template_v2(
-                    path,
-                    source,
-                    language,
-                    &ap,
-                    template,
-                )?;
+                let line = render_template_v2(path, source, language, &ap, template)?;
                 println!("{line}");
             }
         }
@@ -289,7 +280,9 @@ pub fn render_template_v2(
     let file = path.display().to_string();
     let kstr = format_kind(c.kind);
     let lang = language.as_cli_name();
-    let ecnt = span_text(source, c.span.start_byte, c.span.end_byte).escape_default().to_string();
+    let ecnt = span_text(source, c.span.start_byte, c.span.end_byte)
+        .escape_default()
+        .to_string();
     let body = c
         .body
         .map(|b| {
@@ -300,10 +293,7 @@ pub fn render_template_v2(
         .unwrap_or_default();
     let sb = c.span.start_byte.to_string();
     let se = c.span.end_byte.to_string();
-    let bsb = c
-        .body
-        .map(|b| b.start_byte.to_string())
-        .unwrap_or_default();
+    let bsb = c.body.map(|b| b.start_byte.to_string()).unwrap_or_default();
     let bbe = c.body.map(|b| b.end_byte.to_string()).unwrap_or_default();
     // also substitute raw binding names: {bname} = escaped content
     let mut t = out;
@@ -313,7 +303,12 @@ pub fn render_template_v2(
             .to_string();
         t = t.replace(&format!("{{{name}}}"), &content);
     }
-    t = t.replace("{node}", &span_text(source, ap.node.span.start_byte, ap.node.span.end_byte).escape_default().to_string());
+    t = t.replace(
+        "{node}",
+        &span_text(source, ap.node.span.start_byte, ap.node.span.end_byte)
+            .escape_default()
+            .to_string(),
+    );
     t = t.replace(
         "{current}",
         &span_text(source, ap.current.span.start_byte, ap.current.span.end_byte)
@@ -321,20 +316,7 @@ pub fn render_template_v2(
             .to_string(),
     );
     Ok(render_template(
-        &t,
-        &file,
-        &kstr,
-        &start,
-        &end,
-        &range,
-        "",
-        &ecnt,
-        &body,
-        lang,
-        &sb,
-        &se,
-        &bsb,
-        &bbe,
+        &t, &file, &kstr, &start, &end, &range, "", &ecnt, &body, lang, &sb, &se, &bsb, &bbe,
     ))
 }
 
@@ -434,26 +416,28 @@ fn default_bindings(root: MappedNode) -> HashMap<String, MappedNode> {
     b
 }
 
-fn offset(m: &MappedNode, off: usize) -> MappedNode {
-    let sh = |sp: Span| Span {
-        start_byte: sp.start_byte + off,
-        end_byte: sp.end_byte + off,
-    };
-    MappedNode {
-        kind: m.kind,
-        span: sh(m.span),
-        body: m.body.map(sh),
+fn ts_node_exact<'a>(node: Node<'a>, start: usize, end: usize) -> Option<Node<'a>> {
+    if let Some(candidate) = node.descendant_for_byte_range(start, end) {
+        let mut cur = Some(candidate);
+        while let Some(n) = cur {
+            let r = n.range();
+            if r.start_byte == start && r.end_byte == end {
+                return Some(n);
+            }
+            cur = n.parent();
+        }
     }
+    ts_node_exact_dfs(node, start, end)
 }
 
-fn ts_node_exact<'a>(node: Node<'a>, start: usize, end: usize) -> Option<Node<'a>> {
+fn ts_node_exact_dfs<'a>(node: Node<'a>, start: usize, end: usize) -> Option<Node<'a>> {
     let r = node.range();
     if r.start_byte == start && r.end_byte == end {
         return Some(node);
     }
     let mut c = node.walk();
     for child in node.children(&mut c) {
-        if let Some(n) = ts_node_exact(child, start, end) {
+        if let Some(n) = ts_node_exact_dfs(child, start, end) {
             return Some(n);
         }
     }
@@ -466,14 +450,23 @@ fn first_preorder_match(
     n: Node<'_>,
     set: &[UnifiedKind],
 ) -> Result<Option<MappedNode>, String> {
+    first_preorder_match_skip_span(language, n, set, None)
+}
+
+fn first_preorder_match_skip_span(
+    language: Language,
+    n: Node<'_>,
+    set: &[UnifiedKind],
+    skip_span: Option<Span>,
+) -> Result<Option<MappedNode>, String> {
     if let Some(m) = map_unified_node(language, &n) {
-        if set.contains(&m.kind) {
+        if set.contains(&m.kind) && Some(m.span) != skip_span {
             return Ok(Some(m));
         }
     }
     let mut c = n.walk();
     for child in n.children(&mut c) {
-        if let Some(m) = first_preorder_match(language, child, set)? {
+        if let Some(m) = first_preorder_match_skip_span(language, child, set, skip_span)? {
             return Ok(Some(m));
         }
     }
@@ -485,23 +478,15 @@ fn run_first(
     file_root: Node<'_>,
     bindings: &HashMap<String, MappedNode>,
     on: &str,
-    args: &[String],
+    kinds: &[UnifiedKind],
 ) -> Result<Option<MappedNode>, String> {
     let Some(base) = resolve_first_base(language, file_root, bindings, on)? else {
         return Ok(None);
     };
-    let mut kinds: Vec<UnifiedKind> = vec![];
-    for a in args {
-        for k in kinds_from_cli(a.trim())? {
-            if !kinds.contains(&k) {
-                kinds.push(k);
-            }
-        }
-    }
     let Some(n) = ts_node_exact(file_root, base.span.start_byte, base.span.end_byte) else {
         return Err("first: span not in tree".to_string());
     };
-    first_preorder_match(language, n, &kinds)
+    first_preorder_match(language, n, kinds)
 }
 
 fn resolve_first_base(
@@ -528,10 +513,12 @@ fn resolve_first_base(
                 ));
             }
         };
-        return Ok(match assign_body_or_consequence(language, file_root, &base, part) {
-            BodyAssign::Ok(m) => Some(m),
-            BodyAssign::NoMatch => None,
-        });
+        return Ok(
+            match assign_body_or_consequence(language, file_root, &base, part) {
+                BodyAssign::Ok(m) => Some(m),
+                BodyAssign::NoMatch => None,
+            },
+        );
     }
 
     bindings
@@ -620,11 +607,11 @@ fn parse_one_step(s: &str) -> Result<StepStmt, String> {
         if name.is_empty() {
             return Err("assign: empty name".to_string());
         }
-        if let Some((on, args)) = parse_first_call(rhs)? {
+        if let Some((on, kinds)) = parse_first_call(rhs)? {
             return Ok(StepStmt::AssignFirst {
                 name: name.to_string(),
                 on,
-                args,
+                kinds,
             });
         }
         let source = if let Some((on, field)) = rhs.rsplit_once('.') {
@@ -695,7 +682,7 @@ fn parse_one_step(s: &str) -> Result<StepStmt, String> {
                 }
                 Ok(StepStmt::Is {
                     on: on.to_string(),
-                    kind: inner.to_string(),
+                    kinds: kinds_from_cli(inner)?,
                 })
             }
             "has" => {
@@ -704,7 +691,7 @@ fn parse_one_step(s: &str) -> Result<StepStmt, String> {
                 }
                 Ok(StepStmt::Has {
                     on: on.to_string(),
-                    kind: inner.to_string(),
+                    kinds: kinds_from_cli(inner)?,
                 })
             }
             "first" => {
@@ -714,7 +701,7 @@ fn parse_one_step(s: &str) -> Result<StepStmt, String> {
                 }
                 Ok(StepStmt::First {
                     on: on.to_string(),
-                    args,
+                    kinds: compile_first_kinds(&args)?,
                 })
             }
             _ => unreachable!(),
@@ -725,7 +712,7 @@ fn parse_one_step(s: &str) -> Result<StepStmt, String> {
     ))
 }
 
-fn parse_first_call(s: &str) -> Result<Option<(String, Vec<String>)>, String> {
+fn parse_first_call(s: &str) -> Result<Option<(String, Vec<UnifiedKind>)>, String> {
     let Some(p) = s.find(".first(") else {
         return Ok(None);
     };
@@ -740,9 +727,21 @@ fn parse_first_call(s: &str) -> Result<Option<(String, Vec<String>)>, String> {
         if args.is_empty() {
             return Err("first() needs at least one kind".to_string());
         }
-        return Ok(Some((on.to_string(), args)));
+        return Ok(Some((on.to_string(), compile_first_kinds(&args)?)));
     }
     Err(format!("unexpected text after first() in {s:?}"))
+}
+
+fn compile_first_kinds(args: &[String]) -> Result<Vec<UnifiedKind>, String> {
+    let mut out = Vec::new();
+    for a in args {
+        for k in kinds_from_cli(a.trim())? {
+            if !out.contains(&k) {
+                out.push(k);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// s[from] is '('; return string inside the matching paren
