@@ -65,7 +65,9 @@ impl Language {
         use Language::*;
         match self {
             C => &[".c", ".h"],
-            Cpp => &[".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".h++", ".h"],
+            Cpp => &[
+                ".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".h++", ".h",
+            ],
             Java => &[".java"],
             Python => &[".py"],
             Rust => &[".rs"],
@@ -78,9 +80,68 @@ impl std::str::FromStr for Language {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::parse_cli_name(s).ok_or_else(|| {
-            format!(
-                "unknown language {s:?}: expected one of c, cpp, java, python, rust"
-            )
+            format!("unknown language {s:?}: expected one of c, cpp, java, python, rust")
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::Language;
+
+    #[test]
+    fn detects_languages_from_supported_extensions() {
+        let cases = [
+            ("main.c", Language::C),
+            ("include.H", Language::C),
+            ("main.cpp", Language::Cpp),
+            ("header.HXX", Language::Cpp),
+            ("App.java", Language::Java),
+            ("script.PY", Language::Python),
+            ("lib.rs", Language::Rust),
+        ];
+
+        for (path, language) in cases {
+            assert_eq!(Language::detect_from_path(Path::new(path)), Some(language));
+        }
+        assert_eq!(Language::detect_from_path(Path::new("README.md")), None);
+        assert_eq!(Language::detect_from_path(Path::new("Makefile")), None);
+    }
+
+    #[test]
+    fn parses_cli_names_and_reports_errors() {
+        assert_eq!(Language::parse_cli_name(" c++ "), Some(Language::Cpp));
+        assert_eq!(Language::parse_cli_name("PY"), Some(Language::Python));
+        assert_eq!("rs".parse::<Language>().expect("parse rs"), Language::Rust);
+
+        let err = "ruby".parse::<Language>().expect_err("unknown language");
+        assert!(err.contains("unknown language"));
+    }
+
+    #[test]
+    fn exposes_cli_names_and_source_extensions() {
+        assert_eq!(Language::C.as_cli_name(), "c");
+        assert_eq!(Language::Cpp.as_cli_name(), "cpp");
+        assert_eq!(Language::Java.as_cli_name(), "java");
+        assert_eq!(Language::Python.as_cli_name(), "python");
+        assert_eq!(Language::Rust.as_cli_name(), "rust");
+
+        assert!(Language::Cpp.source_extensions().contains(&".hpp"));
+        assert_eq!(Language::Rust.source_extensions(), &[".rs"]);
+    }
+
+    #[test]
+    fn returns_tree_sitter_languages_for_all_variants() {
+        for language in [
+            Language::C,
+            Language::Cpp,
+            Language::Java,
+            Language::Python,
+            Language::Rust,
+        ] {
+            let _ = language.tree_sitter_language();
+        }
     }
 }

@@ -137,16 +137,16 @@ CASE_IDS=(
 )
 
 CASE_NAMES=(
-  "find loop baseline"
+  "find alias loop pipeline"
   "dfs_preorder triple loop pipeline"
-  "find -k loop triple pipeline"
+  "find alias triple loop pipeline"
   "dfs_preorder unified baseline"
 )
 
 CASE_COMMANDS=(
-  "$T find $R -l $L -k loop --print-format '{file}: {type}' >/dev/null 2>/dev/null"
+  "$T find $R -l $L -s 'node.is(loop)' --print-format '{file}: {type}' >/dev/null 2>/dev/null"
   "$T dfs_preorder $R -l $L --step 'node.is(loop)' --step 'b1=node.body' --step 'c1=b1.first(function_definition, branch, loop)' --step 'c1.is(loop)' --step 'c2=c1.body.first(function_definition,branch,loop)' --step 'c2.is(loop)' --print-format '{node.file}: {node}' >/dev/null 2>/dev/null"
-  "$T find $R -l $L -k loop --step 'b1=node.body' --step 'c1=b1.first(function_definition, branch, loop)' --step 'c1.is(loop)' --step 'c2=c1.body.first(function_definition,branch,loop)' --step 'c2.is(loop)' --print-format '{node.file}: {node}' >/dev/null 2>/dev/null"
+  "$T find $R -l $L -s 'node.is(loop)' -s 'b1=node.body' -s 'c1=b1.first(function_definition, branch, loop)' -s 'c1.is(loop)' -s 'c2=c1.body.first(function_definition,branch,loop)' -s 'c2.is(loop)' --print-format '{node.file}: {node}' >/dev/null 2>/dev/null"
   "$T dfs_preorder $R -l $L --print-format '{file}: {type}' >/dev/null 2>/dev/null"
 )
 

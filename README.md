@@ -17,13 +17,13 @@ The same logical construct uses **different spellings** depending on whether you
 
 | Layer | Role | Examples |
 | ----- | ---- | -------- |
-| **CLI input** | `-k` / `--kind`, and the `KIND` argument in `x.has(KIND)` / `x.is(KIND)` in `--step` | `any`, `function_definition`, `branch`, `branch:if`, `branch_clause:else`, `loop`, `loop:for`, … |
+| **CLI input** | The `KIND` argument in `x.has(KIND)` / `x.is(KIND)` / `x.first(KIND)` in `--step` | `any`, `function_definition`, `branch`, `branch:if`, `branch_clause:else`, `loop`, `loop:for`, … |
 | **CLI output** | Default `find` / traverse lines and `{type}` in templates | `FunctionDefinition`, `Branch(If)`, `BranchClause(ElseIf)`, `Loop(For)`, … |
 | **Rust API** | `tree_lang_core::UnifiedKind`, `LoopKind`, `BranchKind`, `BranchClauseKind` | e.g. `UnifiedKind::Branch(BranchKind::If)` |
 
 Input is **ASCII**, case-insensitive, with `-` and `_` treated the same (`loop-for` ≡ `loop_for`).
 
-`any` matches every currently implemented `UnifiedKind`: function definitions, all loop subtypes, all branch subtypes, and all branch clause subtypes. It works anywhere a `KIND` is accepted, including `-k any`, `x.has(any)`, `x.is(any)`, and `x.first(any)`.
+`any` matches every currently implemented `UnifiedKind`: function definitions, all loop subtypes, all branch subtypes, and all branch clause subtypes. It works anywhere a `KIND` is accepted, including `x.has(any)`, `x.is(any)`, and `x.first(any)`.
 
 **Loop subtypes (input):** use either `loop:<subtype>` or the same subtype inside parentheses to mirror output, for example:
 
@@ -33,7 +33,7 @@ Input is **ASCII**, case-insensitive, with `-` and `_` treated the same (`loop-f
 - `loop:dowhile` or **`loop(dowhile)`** / `loop(do_while)` → `Loop(DoWhile)`
 - `loop:infinite` or **`loop(infinite)`** / `loop(forever)` → `Loop(Infinite)` (Rust `loop { }`)
 
-`-k loop` (no subtype) matches **any** of the above loop subtypes in one search.
+`loop` (no subtype) matches **any** of the above loop subtypes in one search.
 
 **Branch subtypes (input):** same pattern as loops — `branch:<subtype>` or `branch(<subtype>)` mirroring `{type}` output:
 
@@ -41,7 +41,7 @@ Input is **ASCII**, case-insensitive, with `-` and `_` treated the same (`loop-f
 - `branch:switch` or **`branch(switch)`** → `Branch(Switch)` (C/C++/Java `switch`)
 - `branch:match` or **`branch(match)`** → `Branch(Match)` (Rust `match`, Python `match`)
 
-`-k branch` matches **any** of the three branch subtypes in one search.
+`branch` matches **any** of the three branch subtypes in one search.
 
 **Branch clause subtypes (input):** `branch_clause:<subtype>` (or `branch_arm:<subtype>`) finds synthetic then/else arms produced from `if` nodes:
 
@@ -49,7 +49,7 @@ Input is **ASCII**, case-insensitive, with `-` and `_` treated the same (`loop-f
 - `branch_clause:else` → `BranchClause(Else)` (the final else alternative)
 - `branch_clause:elseif` / `branch_clause:elif` / `branch_clause:else_if` → `BranchClause(ElseIf)`
 
-`-k branch` does **not** include branch clauses; use `-k branch_clause` to search all clause subtypes.
+`branch` does **not** include branch clauses; use `branch_clause` to search all clause subtypes.
 
 ### What counts as a `loop` (by language)
 
@@ -86,10 +86,10 @@ The project provides a command-line tool also named `tree-lang`.
 
 ### `find` command
 
-Find unified syntax nodes in one or more files/directories.
+`find` is a visible alias for `dfs_preorder`. It walks the full parse tree in depth-first preorder and visits every node that classifies as a unified kind. Use `--step` / `-s` to filter the stream, for example `-s 'node.is(loop)'`.
 
 ```bash
-tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <REGEX> ...]
+tree-lang find <PATH> [<PATH> ...] --language <LANG> [--exclude <REGEX> ...] [--step <STEP> ...]
 ```
 
 #### Arguments
@@ -106,49 +106,9 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
   - target language
   - accepted values: `c`, `cpp` (also `c++`, `cxx`), `java`, `python` (also `py`), `rust` (also `rs`)
 
-- `-k, --kind <KIND>`
-  - target unified syntax kind (see **Unified kinds** above for naming and language mapping)
-  - accepted values:
-    - `function_definition` (also `fn`, `func`)
-    - `branch` (all branch subtypes: if, switch, match)
-    - `branch:if`, `branch:switch`, `branch:match` (also `branch(if)`, etc.)
-    - `loop` (all loop subtypes)
-    - `loop:for` or `loop(for)` (and similarly for other subtypes; see README table)
-    - `loop:foreach`
-    - `loop:while`
-    - `loop:dowhile`
-    - `loop:infinite`
-
 - `-e, --exclude <REGEX>`
   - exclude file paths by regular expression (Rust regex syntax)
   - repeatable; if any regex matches the path string, the file is skipped
-
-- `-n, --name <REGEX>`
-  - filter found structure names by regular expression
-  - currently supported when `--kind function_definition`
-  - useful for matching function names (for example `^parse_` or `.*init.*`)
-
-- `-p, --param-name <REGEX>`
-  - filter by function parameter name (matches any parameter)
-  - repeatable; each provided regex must match at least one parameter name
-  - currently supported when `--kind function_definition`
-
-- `-t, --param-type <REGEX>`
-  - filter by function parameter type (matches any parameter)
-  - repeatable; each provided regex must match at least one parameter type
-  - currently supported when `--kind function_definition`
-
-- `--param-name-at <IDX:REGEX>`
-  - filter by function parameter name at a specific position (0-indexed)
-  - repeatable
-  - example: `--param-name-at 0:^self$`
-  - currently supported when `--kind function_definition`
-
-- `--param-type-at <IDX:REGEX>`
-  - filter by function parameter type at a specific position (0-indexed)
-  - repeatable
-  - example: `--param-type-at 2:^AttrWrapper$`
-  - currently supported when `--kind function_definition`
 
 - `--print [FIELDS]`
   - customize output fields for each match
@@ -170,7 +130,7 @@ tree-lang find <PATH> [<PATH> ...] --language <LANG> --kind <KIND> [--exclude <R
     - `{content}` (escaped node text)
     - `{body}`, `{language}`, `{start_byte}`, `{end_byte}`, `{body_start_byte}`, `{body_end_byte}`
 
-- `-s, --step <STEP>` (repeatable; `find` only when not using function-definition name/param filters)
+- `-s, --step <STEP>` (repeatable)
   - one statement per flag; order matters. Full grammar is in [**Step pipeline (detailed)**](#step-pipeline) below, and in `tree-lang find --help`.
 
 <a id="step-pipeline"></a>
@@ -189,9 +149,9 @@ Each `find` hit (or each unified visit in **Traverse** commands) can run a short
 | `name=x.body` | The body span of an **existing** binding `x` (e.g. `b1=n.body` after `n=node`). Unknown `x` is a pipeline error. |
 | `name=x.consequence` | The if-then span of binding `x` when it is a `branch:if` (same rules as `=consequence` on `current`). |
 | `name=else` / `name=x.else` | The else / alternative span of the current node or binding `x` when it is a `branch:if`. `alternative` is accepted as an alias. If there is no else branch, the hit is skipped. |
-| `x.is(KIND)` | `KIND` uses the **same grammar as `-k`** (see *Unified kinds*). The binding `x` must be one of those kinds; on success, sets **`current` ← `x`**. If it fails, this match is dropped. |
+| `x.is(KIND)` | `KIND` uses the unified kind grammar (see *Unified kinds*). The binding `x` must be one of those kinds; on success, sets **`current` ← `x`**. If it fails, this match is dropped. |
 | `x.has(KIND)` | Walks the already-parsed tree inside **`x`’s span** and looks for a unified hit of the given `KIND` that is **strictly inside** the slice (the full-span match is not counted—same as “first inner” semantics). On success, sets **`current`** to that inner node. If there is no such node, the match is dropped. |
-| `x.first(A, B, …)` | Each argument is a `KIND` list in `-k` syntax; the set of allowed `UnifiedKind` values is the **union** of all arguments. Walks the file’s parse tree **depth-first, preorder** starting from the node covering `x`’s span, **including** `x` if it already matches, and sets **`current`** to the first matching node. If none, the match is dropped. Comma is split at the top level only; nested `loop(for)`-style kind strings are written inside the parentheses, not as extra comma arguments. |
+| `x.first(A, B, …)` | Each argument is a `KIND` list in unified kind syntax; the set of allowed `UnifiedKind` values is the **union** of all arguments. Walks the file’s parse tree **depth-first, preorder** starting from the node covering `x`’s span, **including** `x` if it already matches, and sets **`current`** to the first matching node. If none, the match is dropped. Comma is split at the top level only; nested `loop(for)`-style kind strings are written inside the parentheses, not as extra comma arguments. |
 | `name=x.first(A, B, …)` | Same search as `x.first(...)`, but also stores the found node into `name`. The receiver may also be `x.body`, `x.consequence`, or `x.else`, e.g. `name=x.else.first(loop)`. On success, it also sets **`current`** to that found node. |
 | `emit:`*`TEMPLATE`* | Evaluates *TEMPLATE* like global `--print-format` and prints **one** line to stdout (mid-pipeline). Supports **dotted** placeholders `{` *name* `.` *field* `}` for any in-scope binding, plus the legacy placeholders (see the next subsection). If you use at least one `emit:`, the usual final one-line print for that hit is **not** produced (use `emit:` and/or design the pipeline so the last step is enough). |
 
@@ -205,16 +165,14 @@ Each `find` hit (or each unified visit in **Traverse** commands) can run a short
 - For any other binding *name* you created, `{`*name*`}` is replaced by that node’s full-span escaped text.
 - Dotted and legacy can be combined in one template; a second expansion phase applies the legacy set after the dotted pass.
 
-**`find` restriction:** `--step` cannot be combined with function-only filters on `find` (`--name`, `--param-*`, `--return-type`, `--param-name-at`, `--param-type-at`).
-
 **Examples**
 
 ```bash
 # Inner loop under an outer (body → has) and print the inner’s kind; same idea as a two-level “nested loop” check
-tree-lang find ./src -l rust -k loop --step 'b=body' --step 'b.has(loop)' --print-format '{b.type} {file} {current.range}'
+tree-lang find ./src -l rust -s 'node.is(loop)' -s 'b=body' -s 'b.has(loop)' --print-format '{b.type} {file} {current.range}'
 
 # Bind the hit, require it to be a loop, emit one line mid-pipeline
-tree-lang find . -l c -k loop --step 'n=node' --step 'n.is(loop)' --step 'emit:found {n.file} {n.type}'
+tree-lang find . -l c -s 'n=node' -s 'n.is(loop)' -s 'emit:found {n.file} {n.type}'
 
 # Traverse: only unified visits; at each, filter with is(…) and custom format
 tree-lang dfs_preorder ./src -l rust --step 'c=node' --step 'c.is(loop)' --print-format '{file} {c.range}'
@@ -223,17 +181,18 @@ tree-lang dfs_preorder ./src -l rust --step 'c=node' --step 'c.is(loop)' --print
 tree-lang dfs_preorder crates -l rust --step 'n=node' --step 'n.is(loop)' --step 'c1=n.body.first(function_definition, branch, loop)' --print-format '{c1.type} {c1.range}'
 ```
 
-### Traverse commands (`dfs_*`, `bfs_*`)
+### Traverse commands (`find`, `dfs_*`, `bfs_*`)
 
-Walk the **full** parse tree (every tree-sitter node in the chosen order). Whenever a node classifies as a unified kind (`function_definition`, any `branch`, or any `loop`), run the same `--print` / `--print-format` / `--step` pipeline from that node as `current`.
+Walk the **full** parse tree (every tree-sitter node in the chosen order). Whenever a node classifies as a unified kind (`function_definition`, any `branch`, any `branch_clause`, or any `loop`), run the same `--print` / `--print-format` / `--step` pipeline from that node as `current`.
 
 Subcommands:
 
-- `dfs_preorder` — depth-first, preorder (same visit order family as `find`’s walk)
+- `dfs_preorder` — depth-first, preorder
+- `find` — alias for `dfs_preorder`
 - `dfs_postorder` — depth-first, postorder
 - `bfs_ltr` / `bfs_rtl` — breadth-first, left-to-right or right-to-left among siblings per level
 
-They take paths, `-l` / `--language`, `-e` / `--exclude`, and the same printing / `--step` options as documented for `find` (without `-k` / function filters). Example:
+They take paths, `-l` / `--language`, `-e` / `--exclude`, and the same printing / `--step` options. Example:
 
 ```bash
 tree-lang dfs_preorder ./src -l rust --step 'n=node' --step 'n.is(loop)' --step 'emit:{file} {type}'
@@ -247,8 +206,6 @@ Each match is printed as one line:
 <file_path>\t<UnifiedKind>\t<start_line>:<start_col>-<end_line>:<end_col>
 ```
 
-When function filters are used (`-n`, `-p`, `-t`, `--param-name-at`, `--param-type-at`), an additional function name column is included.
-
 When `--print` is not set, output keeps the default format:
 
 ```text
@@ -261,15 +218,15 @@ Examples:
 
 ```bash
 # Equivalent to --print all
-tree-lang find src -l rust -k function_definition --print
+tree-lang find src -l rust --print
 
 # Custom field order / subset
-tree-lang find src -l rust -k function_definition --print file,type,start,end
-tree-lang find src -l rust -k function_definition --print type,content
+tree-lang find src -l rust --print file,type,start,end
+tree-lang find src -l rust --print type,content
 
 # Custom format template
-tree-lang find src -l rust -k function_definition \
-  --print-format '{file}\t{type}\t{name}\t{range}\t{content}'
+tree-lang find src -l rust \
+  --print-format '{file}\t{type}\t{range}\t{content}'
 ```
 
 Example:
@@ -278,18 +235,16 @@ Example:
 crates/tree-lang/tests/mvp.rs	FunctionDefinition	12:0-34:1
 ```
 
-With function name + parameter filters:
+Filter with `--step`:
 
 ```bash
 tree-lang find crates/tree-lang/tests/data/rust \
   -l rust \
-  -k function_definition \
-  -n '^parse_' \
-  -p '^attrs$' \
-  --param-type-at '1:^Bound$'
+  -s 'node.is(function_definition)' \
+  --print-format '{file}\t{type}\t{range}'
 
 # Read source from stdin
-cat file.rs | tree-lang find - -l rust -k function_definition
+cat file.rs | tree-lang find - -l rust -s 'node.is(function_definition)'
 ```
 
 ## Build / Release CLI Binary

@@ -7,9 +7,8 @@ use regex::Regex;
 use walkdir::WalkDir;
 
 use tree_lang::{
-    extract_unified_kinds, find_function_definitions, format_kind, for_each_subtree_node,
-    kinds_from_cli, map_unified_node, parse, Language, MappedNode, TreeTraversal,
-    UnifiedKind,
+    for_each_subtree_node, format_kind, map_unified_node, parse, Language, MappedNode,
+    TreeTraversal,
 };
 
 #[path = "../internal/pipeline.rs"]
@@ -19,7 +18,7 @@ mod pipeline;
 const STEP_ARG_HELP_SHORT: &str =
     "Pipeline step; repeat with --step (order matters). Use --help for full syntax.";
 
-/// Long help for `--step` (shared by `find` and all traverse subcommands).
+/// Long help for `--step` (shared by traversal commands; `find` is an alias of `dfs_preorder`).
 const STEP_ARG_LONG_HELP: &str = r"Pipeline steps — repeat `--step`; order matters (node-centric).
 
   name=node | current | body | consequence | else | x.body | x.consequence | x.else
@@ -28,13 +27,14 @@ const STEP_ARG_LONG_HELP: &str = r"Pipeline steps — repeat `--step`; order mat
       `=x.body` / `=x.consequence` / `=x.else` use another binding `x` (e.g. `b=n.body`).
       Does not move `current` by itself; later steps use the binding.
 
-  x.is(KIND)          KIND uses the same grammar as -k. Fails the pipeline if `x` is
+  x.is(KIND)          KIND uses unified kind strings (any, loop, branch:if, ...).
+      Fails the pipeline if `x` is
       not one of those kinds. Sets `current` to `x` on success.
 
   x.has(KIND)         Like the old has: first strict inner unified hit in `x`'s span
       (skips the full-span root). Sets `current` to that node.
 
-  x.first(A,B,…)     Union of -k kind lists; first DFS-preorder node under `x` (including
+  x.first(A,B,…)     Union of unified kind lists; first DFS-preorder node under `x` (including
       `x` if it matches) whose kind is in that set. Sets `current` on success.
 
   name=x.first(A,B,…) Same as x.first(...), but also binds the result to `name`.
@@ -46,20 +46,21 @@ const STEP_ARG_LONG_HELP: &str = r"Pipeline steps — repeat `--step`; order mat
 `node` and `current` are always in scope. `--print` / `--print-format` after all steps
 use the final `current` (dotted `name.field` bindings from after-pipeline state).
 
-Restriction (subcommand find only): --step cannot be used with function_definition
-filters (--name, --param-*, --return-type, --param-name-at, --param-type-at).
-
 Example:
   --step 'n=node' --step 'b=n.body' --step 'b.has(loop)' --step 'emit:{b.type}'";
 
 #[derive(Parser)]
-#[command(name = "tree-lang", version, about = "Unified syntax search over source trees")]
+#[command(
+    name = "tree-lang",
+    version,
+    about = "Unified syntax search over source trees"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
-/// Shared flags for `dfs_preorder` / `dfs_postorder` / `bfs_ltr` / `bfs_rtl` (file selection and pipeline).
+/// Shared flags for `dfs_preorder` / `find` / `dfs_postorder` / `bfs_ltr` / `bfs_rtl`.
 #[derive(Args)]
 struct TraverseArgs {
     /// One or more files or directories to read.
@@ -68,9 +69,14 @@ struct TraverseArgs {
     #[arg(short = 'e', long = "exclude", value_name = "REGEX")]
     exclude: Vec<String>,
     /// Target language: c, cpp, java, python, rust, auto (default: auto).
-    #[arg(short = 'l', long = "language", value_name = "LANG", default_value = "auto")]
+    #[arg(
+        short = 'l',
+        long = "language",
+        value_name = "LANG",
+        default_value = "auto"
+    )]
     language: String,
-    /// Print selected output fields: all or comma-separated fields (same as `find`).
+    /// Print selected output fields: all or comma-separated fields.
     #[arg(
         long = "print",
         value_name = "FIELDS",
@@ -78,7 +84,7 @@ struct TraverseArgs {
         default_missing_value = "all"
     )]
     print: Option<String>,
-    /// Print using a format template (same as `find`).
+    /// Print using a format template.
     #[arg(long = "print-format", value_name = "TEMPLATE")]
     print_format: Option<String>,
     #[arg(
@@ -94,11 +100,11 @@ struct TraverseArgs {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Find unified syntax constructs in source files.
-    Find(FindArgs),
     /// Walk the full parse tree depth-first, preorder (node then each child, left to right),
     /// running `--step` (if any) from each node that is a unified construct, in that order.
-    #[command(name = "dfs_preorder")]
+    ///
+    /// Alias: `find`.
+    #[command(name = "dfs_preorder", visible_alias = "find")]
     DfsPreorder(TraverseArgs),
     /// Depth-first, postorder (all children, then the node; children left to right).
     #[command(name = "dfs_postorder")]
@@ -111,63 +117,6 @@ enum Command {
     BfsRtl(TraverseArgs),
 }
 
-#[derive(Args)]
-struct FindArgs {
-    /// One or more files or directories to search.
-    paths: Vec<PathBuf>,
-    /// Exclude paths whose string form matches this regular expression (repeatable).
-    #[arg(short = 'e', long = "exclude", value_name = "REGEX")]
-    exclude: Vec<String>,
-    /// Target language: c, cpp, java, python, rust, auto (default: auto).
-    #[arg(short = 'l', long = "language", value_name = "LANG", default_value = "auto")]
-    language: String,
-    /// Unified syntax kind: any, function_definition, branch, branch:<subtype> (e.g. branch:if),
-    /// branch_clause:<subtype> (then/else/elseif), loop, loop:<subtype>, loop(<subtype>).
-    #[arg(short = 'k', long = "kind", value_name = "KIND")]
-    kind: String,
-    /// Match the name of found structures (when the selected kind has names, e.g. functions).
-    #[arg(short = 'n', long = "name", value_name = "REGEX")]
-    name: Option<String>,
-    /// Match any function parameter name by regular expression (repeatable).
-    #[arg(short = 'p', long = "param-name", value_name = "REGEX")]
-    param_name: Vec<String>,
-    /// Match any function parameter type by regular expression (repeatable).
-    #[arg(short = 't', long = "param-type", value_name = "REGEX")]
-    param_type: Vec<String>,
-    /// Match function return type by regular expression (repeatable).
-    #[arg(short = 'r', long = "return-type", value_name = "REGEX")]
-    return_type: Vec<String>,
-    /// Match function parameter name at index: <IDX:REGEX> (repeatable, 0-indexed).
-    #[arg(long = "param-name-at", value_name = "IDX:REGEX")]
-    param_name_at: Vec<String>,
-    /// Match function parameter type at index: <IDX:REGEX> (repeatable, 0-indexed).
-    #[arg(long = "param-type-at", value_name = "IDX:REGEX")]
-    param_type_at: Vec<String>,
-    /// Print selected output fields: all or comma-separated fields.
-    /// Fields: file,type,start,end,content,body,language,start_byte,end_byte,body_start_byte,body_end_byte
-    /// `--print` (without value) is equivalent to `--print all`.
-    #[arg(
-        long = "print",
-        value_name = "FIELDS",
-        num_args = 0..=1,
-        default_missing_value = "all"
-    )]
-    print: Option<String>,
-    /// Print using a format template.
-    /// Supported placeholders: {file},{type},{start},{end},{range},{name},{content},{body},{language},{start_byte},{end_byte},{body_start_byte},{body_end_byte}
-    #[arg(long = "print-format", value_name = "TEMPLATE")]
-    print_format: Option<String>,
-    #[arg(
-        short = 's',
-        long = "step",
-        value_name = "STEP",
-        action = clap::ArgAction::Append,
-        help = STEP_ARG_HELP_SHORT,
-        long_help = STEP_ARG_LONG_HELP
-    )]
-    step: Vec<String>,
-}
-
 #[derive(Clone, Copy, Debug)]
 enum LanguageSelector {
     Explicit(Language),
@@ -177,236 +126,10 @@ enum LanguageSelector {
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Find(args) => run_find(args),
         Command::DfsPreorder(a) => run_traverse(a, TreeTraversal::DfsPreorder),
         Command::DfsPostorder(a) => run_traverse(a, TreeTraversal::DfsPostorder),
         Command::BfsLtr(a) => run_traverse(a, TreeTraversal::BfsLtr),
         Command::BfsRtl(a) => run_traverse(a, TreeTraversal::BfsRtl),
-    }
-}
-
-fn run_find(args: FindArgs) -> std::process::ExitCode {
-    if args.paths.is_empty() {
-        eprintln!("error: at least one path is required (or use '-' for stdin)");
-        return std::process::ExitCode::from(2);
-    }
-
-    let print_fields = match args.print.as_deref() {
-        Some(raw) => match parse_print_fields(raw) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                eprintln!("error: invalid --print value: {e}");
-                return std::process::ExitCode::from(2);
-            }
-        },
-        None => None,
-    };
-    if print_fields.is_some() && args.print_format.is_some() {
-        eprintln!("error: --print and --print-format cannot be used together");
-        return std::process::ExitCode::from(2);
-    }
-
-    let program: Option<pipeline::StepProgram> = if args.step.is_empty() {
-        None
-    } else {
-        match pipeline::parse_steps(&args.step) {
-            Ok(s) if s.is_empty() => None,
-            Ok(s) => Some(s),
-            Err(e) => {
-                eprintln!("error: invalid --step: {e}");
-                return std::process::ExitCode::from(2);
-            }
-        }
-    };
-
-    let language_selector = match parse_language_selector(&args.language) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return std::process::ExitCode::from(2);
-        }
-    };
-
-    let kinds = match kinds_from_cli(&args.kind) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return std::process::ExitCode::from(2);
-        }
-    };
-
-    let exclude: Vec<Regex> = match args.exclude.iter().map(|p| Regex::new(p)).collect() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("error: invalid --exclude regex: {e}");
-            return std::process::ExitCode::from(2);
-        }
-    };
-    let name_regex = match args.name.as_deref() {
-        Some(p) => match Regex::new(p) {
-            Ok(re) => Some(re),
-            Err(e) => {
-                eprintln!("error: invalid --name regex: {e}");
-                return std::process::ExitCode::from(2);
-            }
-        },
-        None => None,
-    };
-    let param_name_regexes: Vec<Regex> = match args.param_name.iter().map(|p| Regex::new(p)).collect() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("error: invalid --param-name regex: {e}");
-            return std::process::ExitCode::from(2);
-        }
-    };
-    let param_type_regexes: Vec<Regex> = match args.param_type.iter().map(|p| Regex::new(p)).collect() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("error: invalid --param-type regex: {e}");
-            return std::process::ExitCode::from(2);
-        }
-    };
-    let return_type_regexes: Vec<Regex> = match args.return_type.iter().map(|p| Regex::new(p)).collect() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("error: invalid --return-type regex: {e}");
-            return std::process::ExitCode::from(2);
-        }
-    };
-    let indexed_param_name = match parse_indexed_regexes(&args.param_name_at, "--param-name-at") {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return std::process::ExitCode::from(2);
-        }
-    };
-    let indexed_param_type = match parse_indexed_regexes(&args.param_type_at, "--param-type-at") {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return std::process::ExitCode::from(2);
-        }
-    };
-
-    let uses_function_filters = name_regex.is_some()
-        || !param_name_regexes.is_empty()
-        || !param_type_regexes.is_empty()
-        || !return_type_regexes.is_empty()
-        || !indexed_param_name.is_empty()
-        || !indexed_param_type.is_empty();
-    if uses_function_filters && !supports_name_filter(&kinds) {
-        eprintln!(
-            "error: --name/--param-name/--param-type/--return-type/--param-name-at/--param-type-at are currently supported only with --kind function_definition"
-        );
-        return std::process::ExitCode::from(2);
-    }
-    if program.is_some() && uses_function_filters {
-        eprintln!("error: --step pipeline is not supported with function_definition filters (yet)");
-        return std::process::ExitCode::from(2);
-    }
-
-    let mut files = Vec::new();
-    let mut use_stdin = false;
-    for root in &args.paths {
-        if root.as_os_str() == "-" {
-            use_stdin = true;
-            continue;
-        }
-        let collected = match language_selector {
-            LanguageSelector::Explicit(language) => collect_targets(root, language, &exclude),
-            LanguageSelector::Auto => collect_targets_auto(root, &exclude),
-        };
-        match collected {
-            Ok(mut v) => files.append(&mut v),
-            Err(e) => {
-                eprintln!("error: {}: {e}", root.display());
-                return std::process::ExitCode::from(1);
-            }
-        }
-    }
-
-    files.sort();
-    files.dedup();
-
-    let mut had_error = false;
-    if use_stdin {
-        if matches!(language_selector, LanguageSelector::Auto) {
-            eprintln!("error: --language auto cannot be used with stdin; pass an explicit language");
-            return std::process::ExitCode::from(2);
-        }
-        let mut source = String::new();
-        if let Err(e) = std::io::stdin().read_to_string(&mut source) {
-            eprintln!("<stdin>: read error: {e}");
-            return std::process::ExitCode::from(1);
-        }
-        let language = match language_selector {
-            LanguageSelector::Explicit(l) => l,
-            LanguageSelector::Auto => unreachable!("guarded above"),
-        };
-        process_source(
-            Path::new("<stdin>"),
-            &source,
-            language,
-            &kinds,
-            uses_function_filters,
-            name_regex.as_ref(),
-            &param_name_regexes,
-            &param_type_regexes,
-            &return_type_regexes,
-            &indexed_param_name,
-            &indexed_param_type,
-            print_fields.as_deref(),
-            args.print_format.as_deref(),
-            program.as_ref(),
-            &mut had_error,
-        );
-    }
-
-    for path in files {
-        let language = match language_selector {
-            LanguageSelector::Explicit(l) => l,
-            LanguageSelector::Auto => {
-                let Some(detected) = Language::detect_from_path(&path) else {
-                    eprintln!(
-                        "warning: {}: unsupported language for --language auto; skipping",
-                        path.display()
-                    );
-                    continue;
-                };
-                detected
-            }
-        };
-        let source = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("{}: read error: {e}", path.display());
-                had_error = true;
-                continue;
-            }
-        };
-        process_source(
-            &path,
-            &source,
-            language,
-            &kinds,
-            uses_function_filters,
-            name_regex.as_ref(),
-            &param_name_regexes,
-            &param_type_regexes,
-            &return_type_regexes,
-            &indexed_param_name,
-            &indexed_param_type,
-            print_fields.as_deref(),
-            args.print_format.as_deref(),
-            program.as_ref(),
-            &mut had_error,
-        );
-    }
-
-    if had_error {
-        std::process::ExitCode::from(1)
-    } else {
-        std::process::ExitCode::SUCCESS
     }
 }
 
@@ -486,7 +209,9 @@ fn run_traverse(args: TraverseArgs, order: TreeTraversal) -> std::process::ExitC
     let mut had_error = false;
     if use_stdin {
         if matches!(language_selector, LanguageSelector::Auto) {
-            eprintln!("error: --language auto cannot be used with stdin; pass an explicit language");
+            eprintln!(
+                "error: --language auto cannot be used with stdin; pass an explicit language"
+            );
             return std::process::ExitCode::from(2);
         }
         let mut source = String::new();
@@ -607,127 +332,6 @@ fn process_traverse_source(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn process_source(
-    path: &Path,
-    source: &str,
-    language: Language,
-    kinds: &[UnifiedKind],
-    uses_function_filters: bool,
-    name_regex: Option<&Regex>,
-    param_name_regexes: &[Regex],
-    param_type_regexes: &[Regex],
-    return_type_regexes: &[Regex],
-    indexed_param_name: &[IndexedRegex],
-    indexed_param_type: &[IndexedRegex],
-    print_fields: Option<&[PrintField]>,
-    print_format: Option<&str>,
-    pipeline: Option<&pipeline::StepProgram>,
-    had_error: &mut bool,
-) {
-    if uses_function_filters {
-        let functions = match find_function_definitions(language, source) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("{}: parse error: {e}", path.display());
-                *had_error = true;
-                return;
-            }
-        };
-        for f in functions.into_iter().filter(|f| {
-            function_matches(
-                f,
-                name_regex,
-                param_name_regexes,
-                param_type_regexes,
-                return_type_regexes,
-                indexed_param_name,
-                indexed_param_type,
-            )
-        }) {
-            let (sl, sc) = byte_to_line_col(source, f.span.start_byte);
-            let (el, ec) = byte_to_line_col(source, f.span.end_byte);
-            let escaped_body = f
-                .body
-                .map(|b| {
-                    span_text(source, b.start_byte, b.end_byte)
-                        .escape_default()
-                        .to_string()
-                })
-                .unwrap_or_default();
-            let body_start_byte = f
-                .body
-                .map(|b| b.start_byte.to_string())
-                .unwrap_or_default();
-            let body_end_byte = f.body.map(|b| b.end_byte.to_string()).unwrap_or_default();
-            print_match_line(
-                path,
-                language,
-                &format_kind(UnifiedKind::FunctionDefinition),
-                sl,
-                sc,
-                el,
-                ec,
-                f.span.start_byte,
-                f.span.end_byte,
-                Some(&f.name),
-                span_text(source, f.span.start_byte, f.span.end_byte),
-                &escaped_body,
-                &body_start_byte,
-                &body_end_byte,
-                print_fields,
-                print_format,
-            );
-        }
-    } else {
-        let tree = match parse(language, source) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("{}: parse error: {e}", path.display());
-                *had_error = true;
-                return;
-            }
-        };
-        let matches = extract_unified_kinds(language, &tree, kinds);
-        if let Some(prog) = pipeline {
-            for m in &matches {
-                match pipeline::run_unified_pipeline(
-                    path,
-                    source,
-                    language,
-                    tree.root_node(),
-                    m,
-                    prog,
-                ) {
-                    Ok(Some(out)) if out.need_default_print => {
-                        if let Some(ap) = &out.after {
-                            print_unified_after(
-                                path,
-                                source,
-                                language,
-                                ap,
-                                print_fields,
-                                print_format,
-                                had_error,
-                            );
-                        }
-                    }
-                    Ok(Some(_)) => {}
-                    Ok(None) => {}
-                    Err(e) => {
-                        eprintln!("{}: {e}", path.display());
-                        *had_error = true;
-                    }
-                }
-            }
-        } else {
-            for m in matches {
-                print_unified(path, source, language, &m, print_fields, print_format);
-            }
-        }
-    }
-}
-
 fn print_unified(
     path: &Path,
     source: &str,
@@ -746,10 +350,7 @@ fn print_unified(
                 .to_string()
         })
         .unwrap_or_default();
-    let body_start_byte = m
-        .body
-        .map(|b| b.start_byte.to_string())
-        .unwrap_or_default();
+    let body_start_byte = m.body.map(|b| b.start_byte.to_string()).unwrap_or_default();
     let body_end_byte = m.body.map(|b| b.end_byte.to_string()).unwrap_or_default();
     print_match_line(
         path,
@@ -790,93 +391,7 @@ fn print_unified_after(
         }
         return;
     }
-    print_unified(
-        path,
-        source,
-        language,
-        &ap.current,
-        print_fields,
-        None,
-    );
-}
-
-fn supports_name_filter(kinds: &[UnifiedKind]) -> bool {
-    kinds.len() == 1 && kinds[0] == UnifiedKind::FunctionDefinition
-}
-
-#[derive(Debug)]
-struct IndexedRegex {
-    idx: usize,
-    regex: Regex,
-}
-
-fn parse_indexed_regexes(values: &[String], flag: &str) -> Result<Vec<IndexedRegex>, String> {
-    values
-        .iter()
-        .map(|raw| {
-            let (idx_s, regex_s) = raw
-                .split_once(':')
-                .ok_or_else(|| format!("{flag} expects IDX:REGEX, got {raw:?}"))?;
-            let idx = idx_s
-                .parse::<usize>()
-                .map_err(|_| format!("{flag} index must be a non-negative integer, got {idx_s:?}"))?;
-            let regex = Regex::new(regex_s)
-                .map_err(|e| format!("invalid regex in {flag} ({raw:?}): {e}"))?;
-            Ok(IndexedRegex { idx, regex })
-        })
-        .collect()
-}
-
-fn function_matches(
-    f: &tree_lang::FunctionDefinitionNode,
-    name: Option<&Regex>,
-    param_name: &[Regex],
-    param_type: &[Regex],
-    return_type: &[Regex],
-    param_name_at: &[IndexedRegex],
-    param_type_at: &[IndexedRegex],
-) -> bool {
-    if let Some(name_re) = name {
-        if !name_re.is_match(&f.name) {
-            return false;
-        }
-    }
-    for re in param_name {
-        if !f.parameters.iter().any(|p| re.is_match(&p.name)) {
-            return false;
-        }
-    }
-    for re in param_type {
-        if !f
-            .parameters
-            .iter()
-            .any(|p| re.is_match(p.ty.as_deref().unwrap_or("")))
-        {
-            return false;
-        }
-    }
-    for re in return_type {
-        if !re.is_match(f.return_type.as_deref().unwrap_or("")) {
-            return false;
-        }
-    }
-    for rule in param_name_at {
-        let Some(param) = f.parameters.get(rule.idx) else {
-            return false;
-        };
-        if !rule.regex.is_match(&param.name) {
-            return false;
-        }
-    }
-    for rule in param_type_at {
-        let Some(param) = f.parameters.get(rule.idx) else {
-            return false;
-        };
-        if !rule.regex.is_match(param.ty.as_deref().unwrap_or("")) {
-            return false;
-        }
-    }
-    true
+    print_unified(path, source, language, &ap.current, print_fields, None);
 }
 
 fn parse_language_selector(raw: &str) -> Result<LanguageSelector, String> {
@@ -1059,13 +574,7 @@ fn print_match_line(
 
     // Default output keeps the earlier shape for backward compatibility.
     if let Some(name) = name {
-        println!(
-            "{}\t{}\t{}\t{}",
-            path.display(),
-            kind,
-            range,
-            name
-        );
+        println!("{}\t{}\t{}\t{}", path.display(), kind, range, name);
     } else {
         println!("{}\t{}\t{}", path.display(), kind, range);
     }
@@ -1163,4 +672,140 @@ fn parse_print_fields(raw: &str) -> Result<Vec<PrintField>, String> {
         fields.push(field);
     }
     Ok(fields)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use regex::Regex;
+
+    use super::*;
+
+    static TMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn parse_print_fields_accepts_all_and_subsets() {
+        let all = parse_print_fields("all").expect("all fields");
+        assert_eq!(all.len(), 11);
+        assert_eq!(
+            parse_print_fields(" file,TYPE,body_start_byte ").expect("subset"),
+            vec![
+                PrintField::File,
+                PrintField::Type,
+                PrintField::BodyStartByte
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_print_fields_rejects_empty_and_unknown_values() {
+        assert_eq!(parse_print_fields("  ").expect_err("empty"), "empty value");
+        let err = parse_print_fields("file,nope").expect_err("unknown field");
+        assert!(err.contains("unknown field"));
+    }
+
+    #[test]
+    fn render_template_replaces_every_placeholder() {
+        let rendered = render_template(
+            "{file}|{type}|{start}|{end}|{range}|{name}|{content}|{body}|{language}|{start_byte}|{end_byte}|{body_start_byte}|{body_end_byte}",
+            "f.rs",
+            "Loop(For)",
+            "1:0",
+            "1:8",
+            "1:0-1:8",
+            "f",
+            "content",
+            "body",
+            "rust",
+            "0",
+            "8",
+            "2",
+            "7",
+        );
+        assert_eq!(
+            rendered,
+            "f.rs|Loop(For)|1:0|1:8|1:0-1:8|f|content|body|rust|0|8|2|7"
+        );
+    }
+
+    #[test]
+    fn byte_to_line_col_and_span_text_clamp_offsets() {
+        let source = "α\nabc\n";
+        assert_eq!(byte_to_line_col(source, 0), (1, 0));
+        assert_eq!(byte_to_line_col(source, 3), (2, 0));
+        assert_eq!(byte_to_line_col(source, 99), (3, 0));
+        assert_eq!(span_text(source, 3, 6), "abc");
+        assert_eq!(span_text(source, 6, 3), "");
+        assert_eq!(span_text(source, 3, 99), "abc\n");
+    }
+
+    #[test]
+    fn parse_language_selector_accepts_auto_and_languages() {
+        assert!(matches!(
+            parse_language_selector("auto").expect("auto"),
+            LanguageSelector::Auto
+        ));
+        assert!(matches!(
+            parse_language_selector("rust").expect("rust"),
+            LanguageSelector::Explicit(Language::Rust)
+        ));
+        assert!(parse_language_selector("wat").is_err());
+    }
+
+    #[test]
+    fn collect_targets_filters_by_language_and_exclude() {
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let rust = dir.join("lib.rs");
+        let c = dir.join("lib.c");
+        let nested = dir.join("nested");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let excluded = nested.join("skip.rs");
+        fs::write(&rust, "fn main() {}\n").expect("write rust");
+        fs::write(&c, "int main() {}\n").expect("write c");
+        fs::write(&excluded, "fn skip() {}\n").expect("write excluded");
+
+        let exclude = [Regex::new("skip").expect("regex")];
+        let targets = collect_targets(&dir, Language::Rust, &exclude).expect("collect rust");
+        assert_eq!(targets, vec![rust.clone()]);
+
+        let auto_targets = collect_targets_auto(&dir, &exclude).expect("collect auto");
+        assert!(auto_targets.contains(&rust));
+        assert!(auto_targets.contains(&c));
+        assert!(!auto_targets.contains(&excluded));
+        assert!(is_excluded(Path::new("src/skip.rs"), &exclude));
+
+        fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn collect_targets_handles_files_and_invalid_paths() {
+        let dir = temp_dir();
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let rust = dir.join("main.rs");
+        fs::write(&rust, "fn main() {}\n").expect("write rust");
+
+        assert_eq!(
+            collect_targets(&rust, Language::Rust, &[]).expect("collect file"),
+            vec![rust.clone()]
+        );
+        assert_eq!(
+            collect_targets_auto(&rust, &[]).expect("collect auto file"),
+            vec![rust.clone()]
+        );
+        assert!(collect_targets(&dir.join("missing"), Language::Rust, &[]).is_err());
+
+        fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    fn temp_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "tree_lang_bin_tests_{}_{}",
+            std::process::id(),
+            TMP_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 }

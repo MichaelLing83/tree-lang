@@ -878,3 +878,309 @@ fn split_comma_list(s: &str) -> Vec<String> {
     }
     out.into_iter().filter(|s| !s.is_empty()).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use tree_lang::{
+        for_each_subtree_node, format_kind, parse, BranchClauseKind, Language, LoopKind,
+        MappedNode, Span, TreeTraversal, UnifiedKind,
+    };
+    use tree_sitter::Tree;
+
+    use super::*;
+
+    #[test]
+    fn parse_steps_accepts_supported_statement_forms() {
+        let program = parse_steps(&[
+            "n=node".to_string(),
+            "c=current".to_string(),
+            "b=n.body".to_string(),
+            "e=n.else".to_string(),
+            "n.is(function_definition)".to_string(),
+            "n.has(loop)".to_string(),
+            "n.first(branch, loop)".to_string(),
+            "x=n.body.first(loop:for, branch:if)".to_string(),
+            "emit:{x.type}".to_string(),
+        ])
+        .expect("parse steps");
+
+        assert_eq!(program.steps.len(), 9);
+        assert!(matches!(
+            program.steps[3],
+            StepStmt::Assign {
+                source: AssignSource::OnBinding {
+                    part: RelBody::Alternative,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            program.steps[7],
+            StepStmt::AssignFirst {
+                ref name,
+                ref on,
+                ..
+            } if name == "x" && on == "n.body"
+        ));
+    }
+
+    #[test]
+    fn parse_steps_rejects_invalid_forms() {
+        for step in [
+            "=node",
+            "x=missing",
+            ".is(loop)",
+            "x.is()",
+            "x.has()",
+            "x.first()",
+            "x.first(",
+            "x.body.nope(loop)",
+            "x=node.nope",
+        ] {
+            assert!(parse_steps(&[step.to_string()]).is_err(), "{step}");
+        }
+    }
+
+    #[test]
+    fn parser_helpers_handle_nested_commas_and_errors() {
+        assert_eq!(
+            split_comma_list("loop(for), branch(if), first(a,b), , any"),
+            vec!["loop(for)", "branch(if)", "first(a,b)", "any"]
+        );
+        assert_eq!(
+            extract_parens("x(first(loop))", 1).expect("extract"),
+            "first(loop)"
+        );
+        assert_eq!(
+            extract_parens("no paren", 0).expect_err("missing"),
+            "expected ("
+        );
+        assert_eq!(
+            extract_parens("(oops", 0).expect_err("unclosed"),
+            "unclosed ("
+        );
+        assert!(
+            compile_first_kinds(&["loop".to_string(), "loop:for".to_string()])
+                .expect("compile")
+                .contains(&UnifiedKind::Loop(LoopKind::For))
+        );
+    }
+
+    #[test]
+    fn render_template_supports_dotted_and_legacy_fields() {
+        let source = "fn f() { if true { for _ in 0..1 {} } else { while false {} } }\n";
+        let (tree, root) = first_mapped(source, UnifiedKind::FunctionDefinition);
+        let mut bindings = default_bindings(root);
+        bindings.insert(
+            "manual".to_string(),
+            MappedNode {
+                kind: UnifiedKind::Loop(LoopKind::For),
+                span: Span::new(19, 37),
+                body: None,
+            },
+        );
+        let ap = AfterPipeline {
+            node: root,
+            current: root,
+            bindings,
+        };
+        let rendered = render_template_v2(
+            Path::new("sample.rs"),
+            source,
+            Language::Rust,
+            &ap,
+            "{node.type}|{current.language}|{manual.start_byte}|{manual.end_byte}|{manual}|{type}",
+        )
+        .expect("render");
+        assert!(rendered.contains("FunctionDefinition|rust|19|37|"));
+        assert!(rendered.ends_with("|FunctionDefinition"));
+
+        let err = render_template_v2(
+            Path::new("sample.rs"),
+            source,
+            Language::Rust,
+            &ap,
+            "{nope.type}",
+        )
+        .expect_err("unknown binding");
+        assert!(err.contains("unknown node"));
+        let err = field_string(
+            Path::new("sample.rs"),
+            source,
+            Language::Rust,
+            &root,
+            "unknown",
+        )
+        .expect_err("unknown field");
+        assert!(err.contains("unknown field"));
+        drop(tree);
+    }
+
+    #[test]
+    fn empty_pipeline_keeps_root_as_current() {
+        let source = "fn f() {}\n";
+        let (tree, root) = first_mapped(source, UnifiedKind::FunctionDefinition);
+        let program = parse_steps(&[]).expect("empty program");
+        let outcome = run_unified_pipeline(
+            Path::new("sample.rs"),
+            source,
+            Language::Rust,
+            tree.root_node(),
+            &root,
+            &program,
+        )
+        .expect("run")
+        .expect("outcome");
+        assert!(outcome.need_default_print);
+        assert_eq!(outcome.after.expect("after").current.kind, root.kind);
+    }
+
+    #[test]
+    fn pipeline_assigns_fields_and_finds_else_branch_loop() {
+        let source = "fn f() { if true { } else { while false { } } }\n";
+        let (tree, root) = first_mapped(source, UnifiedKind::FunctionDefinition);
+        let program = parse_steps(&[
+            "n=node".to_string(),
+            "if_node=n.body.first(branch:if)".to_string(),
+            "else_body=if_node.else".to_string(),
+            "w=else_body.first(loop:while)".to_string(),
+            "w.is(loop:while)".to_string(),
+        ])
+        .expect("parse");
+        let outcome = run_unified_pipeline(
+            Path::new("sample.rs"),
+            source,
+            Language::Rust,
+            tree.root_node(),
+            &root,
+            &program,
+        )
+        .expect("run")
+        .expect("matched");
+        let after = outcome.after.expect("after");
+        assert_eq!(after.current.kind, UnifiedKind::Loop(LoopKind::While));
+        assert_eq!(
+            after.bindings.get("w").expect("w").kind,
+            UnifiedKind::Loop(LoopKind::While)
+        );
+    }
+
+    #[test]
+    fn pipeline_has_and_first_support_branch_clauses() {
+        let source = "fn f() { if a { } else if b { } else { } }\n";
+        let (tree, root) = first_mapped(source, UnifiedKind::FunctionDefinition);
+        let program = parse_steps(&[
+            "n=node".to_string(),
+            "n.has(branch_clause:elseif)".to_string(),
+            "current.is(branch_clause:elseif)".to_string(),
+        ])
+        .expect("parse");
+        let outcome = run_unified_pipeline(
+            Path::new("sample.rs"),
+            source,
+            Language::Rust,
+            tree.root_node(),
+            &root,
+            &program,
+        )
+        .expect("run")
+        .expect("matched");
+        assert_eq!(
+            outcome.after.expect("after").current.kind,
+            UnifiedKind::BranchClause(BranchClauseKind::ElseIf)
+        );
+    }
+
+    #[test]
+    fn pipeline_returns_none_for_failed_filters_and_missing_fields() {
+        let source = "fn f() { if true { } }\n";
+        let (tree, root) = first_mapped(source, UnifiedKind::FunctionDefinition);
+        for steps in [
+            vec!["node.is(loop)"],
+            vec!["node.has(loop)"],
+            vec!["b=node.else"],
+            vec!["b=node.body", "b.first(loop)"],
+        ] {
+            let program = parse_steps(&steps.into_iter().map(String::from).collect::<Vec<_>>())
+                .expect("parse");
+            let outcome = run_unified_pipeline(
+                Path::new("sample.rs"),
+                source,
+                Language::Rust,
+                tree.root_node(),
+                &root,
+                &program,
+            )
+            .expect("run");
+            assert!(outcome.is_none());
+        }
+    }
+
+    #[test]
+    fn pipeline_reports_unknown_names_and_bad_first_receivers() {
+        let source = "fn f() { if true { } }\n";
+        let (tree, root) = first_mapped(source, UnifiedKind::FunctionDefinition);
+        for (step, expected) in [
+            ("missing.is(loop)", "unknown name"),
+            ("missing.has(loop)", "unknown name"),
+            ("x=missing.body", "unknown name"),
+            ("x=missing.first(loop)", "unknown name"),
+            ("x=node.nope.first(loop)", "receiver field"),
+        ] {
+            let program = parse_steps(&[step.to_string()]).expect("parse");
+            let result = run_unified_pipeline(
+                Path::new("sample.rs"),
+                source,
+                Language::Rust,
+                tree.root_node(),
+                &root,
+                &program,
+            );
+            let err = match result {
+                Ok(_) => panic!("expected pipeline error for {step}"),
+                Err(err) => err,
+            };
+            assert!(err.contains(expected), "{step}: {err}");
+        }
+    }
+
+    #[test]
+    fn first_search_can_match_root_or_skip_root_for_has() {
+        let source = "fn f() { for _ in 0..1 { } }\n";
+        let (tree, root) = first_mapped(source, UnifiedKind::FunctionDefinition);
+        let first = first_preorder_match(Language::Rust, tree.root_node(), &[root.kind])
+            .expect("first")
+            .expect("match");
+        assert_eq!(first.kind, UnifiedKind::FunctionDefinition);
+
+        let skipped = first_preorder_match_skip_span(
+            Language::Rust,
+            tree.root_node(),
+            &[root.kind],
+            Some(root.span),
+        )
+        .expect("skip");
+        assert!(skipped.is_none());
+    }
+
+    fn first_mapped(source: &str, kind: UnifiedKind) -> (Tree, MappedNode) {
+        let tree = parse(Language::Rust, source).expect("parse rust");
+        let mut found = None;
+        for_each_subtree_node(tree.root_node(), TreeTraversal::DfsPreorder, |node| {
+            if found.is_none() {
+                if let Some(mapped) = map_unified_node(Language::Rust, &node) {
+                    if mapped.kind == kind {
+                        found = Some(mapped);
+                    }
+                }
+            }
+        });
+        (
+            tree,
+            found.unwrap_or_else(|| panic!("missing {}", format_kind(kind))),
+        )
+    }
+}
